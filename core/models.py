@@ -142,6 +142,27 @@ class Decision:
     window_days: float = 0.0
 
 
+@dataclass(frozen=True)
+class BanRecord:
+    """封禁记录：禁止某成员或用户与 LLM 对话。"""
+
+    group_id: str
+    user_id: str
+    banned_at: int
+    expire_at: int  # -1 表示永久封禁，否则为到期 Unix 时间戳（秒）
+    banned_by: str = ""
+    reason: str = ""
+
+    @property
+    def is_permanent(self) -> bool:
+        return self.expire_at < 0
+
+    def is_expired(self, now: float) -> bool:
+        if self.is_permanent:
+            return False
+        return now >= self.expire_at
+
+
 def normalize_id(value: object) -> str:
     """把可能为 int/float/str/None 的 ID 归一化为字符串。"""
     if value is None:

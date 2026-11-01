@@ -61,6 +61,17 @@ CREATE TABLE IF NOT EXISTS entity_meta (
     updated_at INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (kind, entity_id)
 );
+
+CREATE TABLE IF NOT EXISTS banned_users (
+    group_id TEXT NOT NULL DEFAULT '',
+    user_id TEXT NOT NULL,
+    banned_at INTEGER NOT NULL,
+    expire_at INTEGER NOT NULL,          -- -1 表示永久封禁，否则为到期时间戳
+    banned_by TEXT NOT NULL DEFAULT '',
+    reason TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (group_id, user_id)
+);
+CREATE INDEX IF NOT EXISTS idx_qh_banned_user ON banned_users(user_id);
 """
 
 
@@ -512,3 +523,58 @@ class Storage(HistoryStorageMixin, StateStorageMixin):
             conn.commit()
 
         await self._run(op)
+
+    # --- 封禁管理 -------------------------------------------------------
+
+    async def set_ban(
+        self,
+        group_id: str,
+        user_id: str,
+        banned_at: int,
+        expire_at: int,
+        banned_by: str = "",
+        reason: str = "",
+    ) -> None:
+        def op(conn: sqlite3.Connection) -> None:
+            conn.execute(
+                "INSERT INTO banned_users(group_id, user_id, banned_at, expire_at, banned_by, reason)"
+                " VALUES(?, ?, ?, ?, ?, ?)"
+                " ON CONFLICT(group_id, user_id) DO UPDATE SET"
+                "  banned_at=excluded.banned_at,"
+                "  expire_at=excluded.expire_at,"
+                "  banned_by=excluded.banned_by,"
+                "  reason=excluded.reason",
+                [group_id, user_id, banned_at, expire_at, banned_by, reason],
+            )
+            conn.commit()
+
+        await self._run(op)
+
+    async def remove_ban(self, group_id: str, user_id: str) -> bool:
+        def op(conn: sqlite3.Connection) -> bool:
+            cur = conn.execute(
+                "DELETE FROM banned_users WHERE group_id = ? AND user_id = ?",
+                [group_id, user_id],
+            )
+            conn.commit()
+            return cur.rowcount > 0
+
+        return await self._run(op)
+
+    async def list_bans(
+        self, now: int | None = None
+    ) -> list[tuple[str, str, int, int, str, str]]:
+        def op(conn: sqlite3.Connection) -> list[tuple[str, str, int, int, str, str]]:
+            if now is not None:
+                return conn.execute(
+                    "SELECT group_id, user_id, banned_at, expire_at, banned_by, reason"
+                    " FROM banned_users WHERE expire_at < 0 OR expire_at > ?"
+                    " ORDER BY banned_at DESC",
+                    [now],
+                ).fetchall()
+            return conn.execute(
+                "SELECT group_id, user_id, banned_at, expire_at, banned_by, reason"
+                " FROM banned_users ORDER BY banned_at DESC"
+            ).fetchall()
+
+        return await self._run(op)

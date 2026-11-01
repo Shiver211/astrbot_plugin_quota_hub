@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import re
 import time
 from dataclasses import replace
 from pathlib import Path
@@ -52,6 +53,7 @@ try:  # 部署时作为 data.plugins.<name>.main 加载
         VALID_WINDOWS,
         WINDOW_LABELS,
         WINDOW_SHORT,
+        BanRecord,
         Decision,
         Override,
         Quota,
@@ -80,6 +82,7 @@ try:  # 部署时作为 data.plugins.<name>.main 加载
     from .core.windows import (
         SECONDS_PER_DAY,
         format_duration,
+        parse_duration,
         reset_in_seconds,
         window_cutoff,
     )
@@ -111,6 +114,7 @@ except ImportError:  # pragma: no cover - 插件根目录在 sys.path 时的兜�
         VALID_WINDOWS,
         WINDOW_LABELS,
         WINDOW_SHORT,
+        BanRecord,
         Decision,
         Override,
         Quota,
@@ -139,6 +143,7 @@ except ImportError:  # pragma: no cover - 插件根目录在 sys.path 时的兜�
     from core.windows import (
         SECONDS_PER_DAY,
         format_duration,
+        parse_duration,
         reset_in_seconds,
         window_cutoff,
     )
@@ -193,6 +198,9 @@ HELP_TEXT = (
     "/quota reset me [long] —— 自助重置自己的短 / 长窗口（消耗重置次数）\n"
     "/quota request short|long [数量] [理由] —— 申请追加重置次数\n"
     "（以下需管理员）\n"
+    "/ban <QQ号或@成员> <时间（如1d）> [理由] —— 禁止成员与 LLM 对话\n"
+    "/unban <QQ号或@成员> —— 解除成员的 LLM 对话封禁\n"
+    "/ban list —— 查看当前处于封禁中的成员列表\n"
     "/quota set user|group|member|members|userdef <...> <次数> <Token> [小时]\n"
     "  members=某群全体成员默认，userdef=该用户在所有群的成员默认\n"
     "/quota setlong user|group|member|members|userdef <...> <次数> <Token> [天数]\n"
@@ -257,6 +265,7 @@ class QuotaHub(QuotaApiMixin, Star):
         self._user_names: dict[str, str] = {}
         self._group_remarks: dict[str, str] = {}
         self._dirty_names: set[tuple[str, str]] = set()
+        self._banned_users: dict[tuple[str, str], BanRecord] = {}
         self._group_names_refreshed_at = 0.0
         self._member_name_cache: dict[str, tuple[float, dict[str, str]]] = {}
         # 会话 → 上次回退提示时戳，用于「同一会话一个窗口内只提示一次」
@@ -270,6 +279,7 @@ class QuotaHub(QuotaApiMixin, Star):
         await self.storage.initialize()
         self._overrides = {ov.key: ov for ov in await self.storage.list_overrides()}
         self._invalidate_quota_cache()
+        await self._load_bans()
         self._load_meta_cache(await self.storage.load_meta())
         # 顺序不可颠倒：先恢复周期状态与重置标记，再回填用量事件，
         # 否则标记之前的记录会被重新加回短窗口（见 docs/adr/0001）。
@@ -284,6 +294,52 @@ class QuotaHub(QuotaApiMixin, Star):
             len(self._overrides),
             len(self.service.known_keys()),
         )
+
+    async def _load_bans(self) -> None:
+        try:
+            now = int(self._now())
+            rows = await self.storage.list_bans(now)
+            self._banned_users = {
+                (gid, uid): BanRecord(gid, uid, bat, exp, by, rsn)
+                for gid, uid, bat, exp, by, rsn in rows
+            }
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("quota_hub 加载封禁列表失败: %s", exc)
+
+    def is_banned(
+        self, group_id: str, user_id: str, now: float | None = None
+    ) -> BanRecord | None:
+        """检查用户是否处于封禁状态。先查群成员封禁，再查全局封禁。"""
+        if not user_id:
+            return None
+        if now is None:
+            now = self._now()
+        # 1. 检查当前群成员封禁
+        if group_id:
+            ban = self._banned_users.get((group_id, user_id))
+            if ban is not None:
+                if ban.expire_at < 0 or ban.expire_at > now:
+                    return ban
+                self._banned_users.pop((group_id, user_id), None)
+                asyncio.create_task(self._safe_remove_ban(group_id, user_id))
+        # 2. 检查全局封禁
+        ban = self._banned_users.get(("", user_id))
+        if ban is not None:
+            if ban.expire_at < 0 or ban.expire_at > now:
+                return ban
+            self._banned_users.pop(("", user_id), None)
+            asyncio.create_task(self._safe_remove_ban("", user_id))
+        return None
+
+    async def _safe_remove_ban(self, group_id: str, user_id: str) -> None:
+        try:
+            await self.storage.remove_ban(group_id, user_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("quota_hub 移除过期封禁失败: %s", exc)
+
+    @staticmethod
+    def _fmt_time_full(ts: float) -> str:
+        return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts))
 
     def _load_meta_cache(self, rows: list[tuple[str, str, str, str]]) -> None:
         for kind, entity_id, name, remark in rows:
@@ -347,6 +403,11 @@ class QuotaHub(QuotaApiMixin, Star):
                 self._fallback_notified = {
                     k: v for k, v in self._fallback_notified.items() if v >= notice_cutoff
                 }
+                # 清理过期封禁
+                for bk, bv in list(self._banned_users.items()):
+                    if bv.is_expired(now):
+                        self._banned_users.pop(bk, None)
+                        await self.storage.remove_ban(bk[0], bk[1])
                 await self._refresh_group_names()
                 await self._persist_names()
                 # 先把已关账的小时固化进历史汇总，再清理明细；purge 以水位线为
@@ -947,7 +1008,9 @@ class QuotaHub(QuotaApiMixin, Star):
             return
         group_id = normalize_id(event.get_group_id())
         user_id = normalize_id(event.get_sender_id())
-        if not user_id or not self._is_subject_to_limit(group_id, user_id):
+        if not user_id or self.is_banned(group_id, user_id):
+            return
+        if not self._is_subject_to_limit(group_id, user_id):
             return
         keys = scopes_for(group_id, user_id)
         now = self._now()
@@ -968,6 +1031,28 @@ class QuotaHub(QuotaApiMixin, Star):
         user_id = normalize_id(event.get_sender_id())
         if not user_id:
             return
+
+        now = self._now()
+        ban = self.is_banned(group_id, user_id, now)
+        if ban is not None:
+            if bool(self.config.get("send_ban_message", True)):
+                expire_str = "永久" if ban.is_permanent else self._fmt_time_full(ban.expire_at)
+                remaining_str = ""
+                if not ban.is_permanent:
+                    remaining_str = f"（剩余约 {format_duration(ban.expire_at - now)}）"
+                reason_str = f"，理由：{ban.reason}" if ban.reason else ""
+                ban_tip = f"🚫 你已被管理员禁止与 LLM 对话至 {expire_str}{remaining_str}{reason_str}"
+                try:
+                    await event.send(MessageChain().message(ban_tip))
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("quota_hub 发送封禁提示失败: %s", exc)
+            event.stop_event()
+            logger.info(
+                "quota_hub 封禁拦截 group=%s user=%s expire_at=%s reason=%s",
+                group_id, user_id, ban.expire_at, ban.reason,
+            )
+            return
+
         if not self._is_subject_to_limit(group_id, user_id):
             return
 
@@ -1302,6 +1387,12 @@ class QuotaHub(QuotaApiMixin, Star):
         now = self._now()
         await self.service.touch_all(keys, now)  # 查询前推进到期
         lines = ["📊 你的配额用量："]
+        ban = self.is_banned(group_id, user_id, now)
+        if ban is not None:
+            expire_str = "永久" if ban.is_permanent else self._fmt_time_full(ban.expire_at)
+            rem = f"（剩余约 {format_duration(ban.expire_at - now)}）" if not ban.is_permanent else ""
+            rsn = f"，理由：{ban.reason}" if ban.reason else ""
+            lines.append(f"· 🚫 封禁状态：已被禁止与 LLM 对话至 {expire_str}{rem}{rsn}")
         for key in keys:
             lines.extend(self._status_lines(key, now))
         # 自助重置次数与申请状态只针对「自己」的实体：群里是成员实体，私聊是私聊实体
@@ -2014,6 +2105,276 @@ class QuotaHub(QuotaApiMixin, Star):
             event, action, kind, ident, "monitored_groups", "monitored_users"
         ):
             yield result
+
+
+    # --- 封禁指令 -------------------------------------------------------
+
+    @staticmethod
+    def _extract_target_id(event: AstrMessageEvent, candidate: str | None) -> str:
+        """从参数或消息中的 At 元件提取 QQ 号 / 用户 ID。"""
+        if candidate:
+            raw = str(candidate).strip()
+            m = re.search(r"qq=(\d+)", raw)
+            if m:
+                return m.group(1)
+            if raw.startswith("@") and raw[1:].isdigit():
+                return raw[1:]
+            if raw.isdigit():
+                return raw
+
+        msg_obj = getattr(event, "message_obj", None)
+        components = getattr(msg_obj, "message", None)
+        if components and isinstance(components, (list, tuple)):
+            for comp in components:
+                qq = (
+                    getattr(comp, "qq", None)
+                    or getattr(comp, "target", None)
+                    or getattr(comp, "user_id", None)
+                )
+                if qq:
+                    return normalize_id(qq)
+
+        return normalize_id(candidate)
+
+    @filter.permission_type(PermissionType.ADMIN)
+    @filter.command("ban")
+    async def cmd_ban(
+        self,
+        event: AstrMessageEvent,
+        target: str | None = None,
+        duration: str | None = None,
+        r1: str | None = None,
+        r2: str | None = None,
+        r3: str | None = None,
+        r4: str | None = None,
+    ):
+        """/ban <QQ号或@成员> <时间（如1d）> [理由] —— 禁止成员与 LLM 对话。"""
+        async for res in self._handle_ban(event, target, duration, [r1, r2, r3, r4]):
+            yield res
+
+    @filter.permission_type(PermissionType.ADMIN)
+    @filter.command("unban")
+    async def cmd_unban(
+        self,
+        event: AstrMessageEvent,
+        target: str | None = None,
+        r1: str | None = None,
+    ):
+        """/unban <QQ号或@成员> —— 解除成员的 LLM 对话封禁。"""
+        async for res in self._handle_unban(event, target, r1):
+            yield res
+
+    @filter.permission_type(PermissionType.ADMIN)
+    @quota_root.command("ban")
+    async def quota_ban(
+        self,
+        event: AstrMessageEvent,
+        target: str | None = None,
+        duration: str | None = None,
+        r1: str | None = None,
+        r2: str | None = None,
+        r3: str | None = None,
+        r4: str | None = None,
+    ):
+        async for res in self._handle_ban(event, target, duration, [r1, r2, r3, r4]):
+            yield res
+
+    @filter.permission_type(PermissionType.ADMIN)
+    @quota_root.command("unban")
+    async def quota_unban(
+        self,
+        event: AstrMessageEvent,
+        target: str | None = None,
+        r1: str | None = None,
+    ):
+        async for res in self._handle_unban(event, target, r1):
+            yield res
+
+    @filter.permission_type(PermissionType.ADMIN)
+    @quota_root.command("banlist")
+    async def quota_banlist(self, event: AstrMessageEvent):
+        async for res in self._handle_banlist(event):
+            yield res
+
+    async def _handle_ban(
+        self,
+        event: AstrMessageEvent,
+        target: str | None,
+        duration: str | None,
+        extra_args: list[Any],
+    ):
+        if not event.is_admin():
+            yield event.plain_result(ADMIN_ONLY_TIP)
+            return
+
+        if not target or target.lower() in ("help", "-h", "--help"):
+            yield event.plain_result(
+                "用法：/ban <QQ号或@成员> <时间（如1d）> [理由]\n"
+                "示例：\n"
+                "  /ban 123456789 1d\n"
+                "  /ban 123456789 2h 违规发言\n"
+                "  /ban @成员 30m\n"
+                "时间单位：s(秒), m(分), h(时), d(天), w(周), 0(解封), 永久\n"
+                "查看封禁：/ban list  |  解封：/unban <QQ号>"
+            )
+            return
+
+        if target.lower() == "list":
+            async for res in self._handle_banlist(event):
+                yield res
+            return
+
+        target_id = ""
+        dur_seconds: float | None = None
+        group_id = normalize_id(event.get_group_id())
+        reason = ""
+
+        test_dur = parse_duration(duration)
+        if test_dur is not None:
+            target_id = self._extract_target_id(event, target)
+            dur_seconds = test_dur
+            reason = self._join_words(extra_args)
+        elif extra_args and extra_args[0] is not None:
+            test_dur_2 = parse_duration(extra_args[0])
+            if test_dur_2 is not None:
+                group_id = normalize_id(target)
+                target_id = self._extract_target_id(event, duration)
+                dur_seconds = test_dur_2
+                reason = self._join_words(extra_args[1:])
+
+        if dur_seconds is None or not target_id:
+            yield event.plain_result(
+                "⚠️ 时间格式不正确或未识别到 QQ 号。\n"
+                "用法：/ban <QQ号或@成员> <时间（如1d）> [理由]\n"
+                "示例：/ban 123456789 1d，支持单位：s(秒), m(分), h(时), d(天), w(周), 永久"
+            )
+            return
+
+        if dur_seconds == 0.0:
+            async for res in self._handle_unban(event, target_id):
+                yield res
+            return
+
+        admin_id = normalize_id(event.get_sender_id())
+        if target_id == admin_id:
+            yield event.plain_result("⚠️ 不能封禁自己")
+            return
+
+        is_global = False
+        if "global" in reason.lower() or "全局" in reason:
+            is_global = True
+            group_id = ""
+            reason = reason.replace("global", "").replace("全局", "").strip()
+
+        now = int(self._now())
+        if dur_seconds < 0:
+            expire_at = -1
+            time_desc = "永久"
+        else:
+            expire_at = int(now + dur_seconds)
+            time_desc = f"至 {self._fmt_time_full(expire_at)}（时长 {format_duration(dur_seconds)}）"
+
+        ban_rec = BanRecord(
+            group_id=group_id,
+            user_id=target_id,
+            banned_at=now,
+            expire_at=expire_at,
+            banned_by=admin_id,
+            reason=reason,
+        )
+
+        self._banned_users[(group_id, target_id)] = ban_rec
+        try:
+            await self.storage.set_ban(
+                group_id, target_id, now, expire_at, admin_id, reason
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.error("quota_hub 保存封禁记录失败: %s", exc)
+            yield event.plain_result(f"⚠️ 保存封禁记录失败: {exc}")
+            return
+
+        scope_desc = f"群 {group_id} 成员" if group_id else "用户（全局）"
+        reason_desc = f"，理由：{reason}" if reason else ""
+        yield event.plain_result(
+            f"✅ 已禁止 {scope_desc} {target_id} 与 LLM 对话 {time_desc}{reason_desc}"
+        )
+
+    async def _handle_unban(
+        self,
+        event: AstrMessageEvent,
+        target: str | None,
+        extra_arg: str | None = None,
+    ):
+        if not event.is_admin():
+            yield event.plain_result(ADMIN_ONLY_TIP)
+            return
+
+        if not target:
+            yield event.plain_result("用法：/unban <QQ号或@成员>")
+            return
+
+        group_id = normalize_id(event.get_group_id())
+        if extra_arg and str(extra_arg).strip():
+            group_id = normalize_id(target)
+            target_id = self._extract_target_id(event, extra_arg)
+        else:
+            target_id = self._extract_target_id(event, target)
+
+        if not target_id:
+            yield event.plain_result("⚠️ 无法识别目标 QQ 号或成员")
+            return
+
+        removed_any = False
+        if group_id:
+            if (group_id, target_id) in self._banned_users:
+                self._banned_users.pop((group_id, target_id), None)
+                removed_any = True
+            db_rem = await self.storage.remove_ban(group_id, target_id)
+            if db_rem:
+                removed_any = True
+
+        if ("", target_id) in self._banned_users:
+            self._banned_users.pop(("", target_id), None)
+            removed_any = True
+        db_rem_global = await self.storage.remove_ban("", target_id)
+        if db_rem_global:
+            removed_any = True
+
+        if removed_any:
+            yield event.plain_result(f"✅ 已解除 {target_id} 的 LLM 对话封禁")
+        else:
+            yield event.plain_result(f"⚠️ 未找到 {target_id} 的有效封禁记录")
+
+    async def _handle_banlist(self, event: AstrMessageEvent):
+        if not event.is_admin():
+            yield event.plain_result(ADMIN_ONLY_TIP)
+            return
+
+        now = self._now()
+        active_bans: list[BanRecord] = []
+        for k, b in list(self._banned_users.items()):
+            if b.is_expired(now):
+                self._banned_users.pop(k, None)
+                asyncio.create_task(self._safe_remove_ban(k[0], k[1]))
+            else:
+                active_bans.append(b)
+
+        if not active_bans:
+            yield event.plain_result("✅ 当前没有被禁止对话的成员")
+            return
+
+        lines = ["📋 当前 LLM 对话封禁名单："]
+        for b in active_bans:
+            scope_desc = f"群 {b.group_id} 成员" if b.group_id else "全局"
+            if b.is_permanent:
+                dur_str = "永久封禁"
+            else:
+                dur_str = f"至 {self._fmt_time_full(b.expire_at)}（剩余约 {format_duration(b.expire_at - now)}）"
+            reason_str = f"，理由：{b.reason}" if b.reason else ""
+            lines.append(f"· {b.user_id}（{scope_desc}）：{dur_str}{reason_str}")
+
+        lines.append("解封指令：/unban <QQ号>")
+        yield event.plain_result("\n".join(lines))
 
     @filter.permission_type(PermissionType.ADMIN)
     @quota_root.command("exempt")

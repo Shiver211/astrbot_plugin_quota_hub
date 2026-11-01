@@ -246,6 +246,11 @@
     "type": "bool",
     "default": true
   },
+  "send_ban_message": {
+    "description": "封禁拦截时发送提示",
+    "type": "bool",
+    "default": true
+  },
   "block_message": {
     "description": "拦截提示模板",
     "type": "text",
