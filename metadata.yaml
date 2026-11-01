@@ -1,0 +1,23 @@
+name: astrbot_plugin_quota_hub
+desc: 配额中枢——限制每个人、每个群、群里每个成员在一段时间内调用 AI 的次数和 Token 用量，并提供网页面板随时查看用量、调整额度。
+short_desc: 限制个人 / 群 / 成员的 AI 调用次数与 Token 用量，带网页统计面板
+version: 0.4.1
+author: Dracowyn
+repo: "https://github.com/Dracowyn/astrbot_plugin_quota_hub"
+display_name: 配额中枢
+tags:
+  - 配额
+  - 限流
+  - 限额
+  - Token
+  - 数据中台
+  - rate-limit
+  - quota
+support_platforms:
+  - aiocqhttp
+  - qq_official
+  - qq_official_webhook
+astrbot_version: ">=4.24.2"
+pages:
+  - name: dashboard
+    title: 配额中枢

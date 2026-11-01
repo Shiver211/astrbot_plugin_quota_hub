@@ -1,0 +1,267 @@
+{
+  "enabled": {
+    "description": "启用配额限制",
+    "type": "bool",
+    "default": true,
+    "hint": "关闭后插件不再拦截任何请求，但仍会记录用量供中台统计。"
+  },
+  "enforcement_mode": {
+    "description": "生效范围模式",
+    "type": "string",
+    "default": "allowlist",
+    "options": [
+      "allowlist",
+      "all"
+    ],
+    "hint": "allowlist：仅对监控列表内的群/人生效；all：默认对所有人生效，白名单豁免。"
+  },
+  "window_hours": {
+    "description": "滚动时间窗口（小时）",
+    "type": "float",
+    "default": 5,
+    "hint": "统计最近 N 小时的用量，随时间平滑滚动。可被单实体覆盖值覆盖。"
+  },
+  "default_private_calls": {
+    "description": "默认·私聊·调用次数上限",
+    "type": "int",
+    "default": 50,
+    "hint": "-1 表示不限。"
+  },
+  "default_private_tokens": {
+    "description": "默认·私聊·Token 上限",
+    "type": "int",
+    "default": -1,
+    "hint": "-1 表示不限。"
+  },
+  "default_group_calls": {
+    "description": "默认·整个群共享·调用次数上限",
+    "type": "int",
+    "default": 200,
+    "hint": "全群所有成员共享此额度。-1 表示不限。"
+  },
+  "default_group_tokens": {
+    "description": "默认·整个群共享·Token 上限",
+    "type": "int",
+    "default": 1000000,
+    "hint": "全群所有成员共享此额度。-1 表示不限。"
+  },
+  "default_member_calls": {
+    "description": "默认·群内每个成员·调用次数上限",
+    "type": "int",
+    "default": 30,
+    "hint": "群内每名成员各自的额度。-1 表示不限。"
+  },
+  "default_member_tokens": {
+    "description": "默认·群内每个成员·Token 上限",
+    "type": "int",
+    "default": -1,
+    "hint": "群内每名成员各自的额度。-1 表示不限。"
+  },
+  "long_window_days": {
+    "description": "长窗口天数",
+    "type": "float",
+    "default": 7,
+    "hint": "天级锚定窗口：实体首次放行调用时开窗，满 N 天整体到期归零，每个实体的开窗时刻各不相同。可被单实体覆盖值覆盖。"
+  },
+  "default_private_long_calls": {
+    "description": "默认·私聊·长窗口调用次数上限",
+    "type": "int",
+    "default": -1,
+    "hint": "-1 表示不限。长窗口耗尽即拦截，不回退。"
+  },
+  "default_private_long_tokens": {
+    "description": "默认·私聊·长窗口 Token 上限",
+    "type": "int",
+    "default": -1,
+    "hint": "-1 表示不限。"
+  },
+  "default_group_long_calls": {
+    "description": "默认·整个群共享·长窗口调用次数上限",
+    "type": "int",
+    "default": -1,
+    "hint": "全群所有成员共享此额度。-1 表示不限。"
+  },
+  "default_group_long_tokens": {
+    "description": "默认·整个群共享·长窗口 Token 上限",
+    "type": "int",
+    "default": -1,
+    "hint": "全群所有成员共享此额度。-1 表示不限。"
+  },
+  "default_member_long_calls": {
+    "description": "默认·群内每个成员·长窗口调用次数上限",
+    "type": "int",
+    "default": -1,
+    "hint": "群内每名成员各自的额度。-1 表示不限。"
+  },
+  "default_member_long_tokens": {
+    "description": "默认·群内每个成员·长窗口 Token 上限",
+    "type": "int",
+    "default": -1,
+    "hint": "群内每名成员各自的额度。-1 表示不限。"
+  },
+  "over_limit_action": {
+    "description": "超限时的措施",
+    "type": "string",
+    "default": "block",
+    "options": [
+      "block",
+      "fallback"
+    ],
+    "option_labels": [
+      "拦截并提示",
+      "回退到备用模型"
+    ],
+    "hint": "block：达到上限直接拦截并提示；fallback：改用备用模型继续回复，直到备用额度也耗尽才拦截。"
+  },
+  "fallback_provider_id": {
+    "description": "默认·备用模型供应商",
+    "type": "string",
+    "default": "",
+    "hint": "选择「回退到备用模型」时的默认备用模型，可被逐实体覆盖。中台下拉为当前已加载的聊天模型供应商。"
+  },
+  "fallback_call_limit": {
+    "description": "默认·备用模型·额外调用次数",
+    "type": "int",
+    "default": 0,
+    "hint": "达到常规调用上限后，备用模型额外允许的调用次数（硬上限=常规上限+本值）。0 表示调用不回退（直接拦截）。"
+  },
+  "fallback_token_limit": {
+    "description": "默认·备用模型·额外 Token",
+    "type": "int",
+    "default": 0,
+    "hint": "达到常规 Token 上限后，备用模型额外允许的 Token（硬上限=常规上限+本值）。0 表示 Token 不回退。"
+  },
+  "send_fallback_message": {
+    "description": "回退时发送提示",
+    "type": "bool",
+    "default": true,
+    "hint": "切换到备用模型时在会话内提示；同一会话一个窗口内只提示一次。"
+  },
+  "fallback_message": {
+    "description": "回退提示模板",
+    "type": "text",
+    "default": "⚠️ 本{scope_label}常规{metric_label}已达上限（{used}/{limit}），已切换到备用模型继续为你服务，约 {reset_in} 后恢复。",
+    "hint": "可用变量：{scope} {scope_label} {window_label} {window_days} {metric} {metric_label} {used} {limit} {window_hours} {reset_in}"
+  },
+  "allow_user_query": {
+    "description": "允许用户查询配额余额",
+    "type": "bool",
+    "default": true,
+    "hint": "关闭后普通用户使用 /quota me 会收到下方的拒绝文案；管理员不受影响。"
+  },
+  "query_denied_message": {
+    "description": "查询被拒绝时的提示",
+    "type": "string",
+    "default": "管理员未开放配额查询"
+  },
+  "allow_self_reset": {
+    "description": "允许用户自助重置",
+    "type": "bool",
+    "default": false,
+    "hint": "开启后用户可用 /quota reset me [long] 消耗重置次数重置自己的短 / 长窗口用量。群共享池只能由管理员重置。"
+  },
+  "self_reset_short_count": {
+    "description": "默认·每周期短窗口自助重置次数",
+    "type": "int",
+    "default": 1,
+    "hint": "每个实体在一个长窗口周期内可自助重置短窗口的次数，自然到期时补满。可按实体覆盖；改动下个自然周期生效。"
+  },
+  "self_reset_long_count": {
+    "description": "默认·每周期长窗口自助重置次数",
+    "type": "int",
+    "default": 0,
+    "hint": "每个实体在一个周期内可自助重置长窗口（提前结束周期）的次数。由重置结束的周期，下一周期不补满。"
+  },
+  "allow_reset_request": {
+    "description": "允许申请额外重置次数",
+    "type": "bool",
+    "default": false,
+    "hint": "开启后用户可用 /quota request short|long [数量] [理由] 申请，管理员用 /quota approve|deny 审批。"
+  },
+  "request_max_count": {
+    "description": "单次申请最多可申请的次数",
+    "type": "int",
+    "default": 3,
+    "hint": "超过该数量的申请直接拒绝。"
+  },
+  "request_notify_sessions": {
+    "description": "申请通知会话列表",
+    "type": "list",
+    "default": [],
+    "hint": "有新申请时主动推送到这些会话（unified_msg_origin，可在目标会话里用 /quota session 获取）。qq_official 平台不支持主动推送。"
+  },
+  "auto_reset_on_block": {
+    "description": "触顶自动使用重置次数",
+    "type": "bool",
+    "default": false,
+    "hint": "达到上限时自动消耗一次该窗口的重置次数并继续放行（每次请求最多一次）。前置条件与 /quota reset me 完全一致；群共享池不适用（群池只有管理员可重置）。短窗口触顶消耗短窗口次数，长窗口触顶消耗长窗口次数。注意本开关不受「允许用户自助重置」(allow_self_reset) 控制，两者是独立开关：关闭自助重置后自动重置仍会生效。"
+  },
+  "auto_reset_silent": {
+    "description": "自动使用重置次数时不提示",
+    "type": "bool",
+    "default": false,
+    "hint": "开启后自动重置不在会话内提示，用户仍可从 /quota me 的剩余次数与中台重置日志看到。"
+  },
+  "auto_reset_message": {
+    "description": "自动重置提示模板",
+    "type": "text",
+    "default": "♻️ 已达{window_label}上限，自动为你使用 1 次重置（本周期剩余 {remaining} 次），本次请求继续。",
+    "hint": "可用变量：{scope} {scope_label} {window_label} {window_days} {metric} {metric_label} {used} {limit} {window_hours} {reset_in} {remaining}"
+  },
+  "monitored_groups": {
+    "description": "监控群列表（allowlist 模式）",
+    "type": "list",
+    "default": [],
+    "hint": "仅这些群会被限流。群号字符串。"
+  },
+  "monitored_users": {
+    "description": "监控用户列表（allowlist 模式，私聊）",
+    "type": "list",
+    "default": [],
+    "hint": "仅这些用户的私聊会被限流。用户 ID 字符串。"
+  },
+  "exempt_groups": {
+    "description": "豁免群列表（all 模式）",
+    "type": "list",
+    "default": [],
+    "hint": "all 模式下，这些群不受限。"
+  },
+  "exempt_users": {
+    "description": "豁免用户列表（all 模式）",
+    "type": "list",
+    "default": [],
+    "hint": "all 模式下，这些用户不受限（私聊与群内均豁免）。"
+  },
+  "skip_prefixes": {
+    "description": "跳过前缀",
+    "type": "list",
+    "default": [
+      "/",
+      "#"
+    ],
+    "hint": "以这些前缀开头的消息视为指令，不计入也不拦截。"
+  },
+  "send_block_message": {
+    "description": "拦截时发送提示",
+    "type": "bool",
+    "default": true
+  },
+  "block_message": {
+    "description": "拦截提示模板",
+    "type": "text",
+    "default": "⚠️ 已达使用上限（{scope_label} {window_label} {metric_label}：{used}/{limit}），约 {reset_in} 后恢复。如需提升请联系管理员。",
+    "hint": "可用变量：{scope} {scope_label} {window_label} {window_days} {metric} {metric_label} {used} {limit} {window_hours} {reset_in}"
+  },
+  "retention_days": {
+    "description": "用量数据保留天数",
+    "type": "int",
+    "default": 30,
+    "hint": "超过该天数的逐条用量记录会被定期清理（仅影响中台历史，不影响实时限流）。清理前会先固化到小时级历史汇总。小于最长的长窗口天数时以长窗口为准（长窗口用量需要从明细重算）。"
+  },
+  "history_retention_days": {
+    "description": "历史汇总保留天数",
+    "type": "int",
+    "default": 0,
+    "hint": "「历史统计」所用小时级汇总的保留天数，0 表示永久保留（存储开销极小）。仅影响历史统计页，不影响实时限流。"
+  }
+}

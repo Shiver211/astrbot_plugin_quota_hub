@@ -1,0 +1,328 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!-- 头像走腾讯 CDN，no-referrer 避免把仪表盘地址泄露给第三方 -->
+    <meta name="referrer" content="no-referrer" />
+    <title>配额中枢</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <span class="logo">⚖️</span>
+        <h1>配额中枢</h1>
+      </div>
+      <nav class="tabs">
+        <button type="button" class="tab active" data-tab="dashboard">数据中台</button>
+        <button type="button" class="tab" data-tab="history">历史统计</button>
+        <button type="button" class="tab" data-tab="requests">申请与重置</button>
+        <button type="button" class="tab" data-tab="config">配置</button>
+      </nav>
+      <button type="button" id="refresh" class="ghost-btn" title="刷新">↻ 刷新</button>
+    </header>
+
+    <main>
+      <!-- ===================== 数据中台 ===================== -->
+      <section id="tab-dashboard" class="tab-panel active">
+        <div id="cards" class="cards"></div>
+
+        <div class="charts">
+          <div class="panel chart-panel">
+            <div class="panel-head">
+              <h2>用量趋势（当前窗口）</h2>
+              <span id="series-legend" class="muted"></span>
+            </div>
+            <div id="chart-trend" class="echart"></div>
+            <div id="chart-trend-empty" class="empty is-hidden"></div>
+          </div>
+          <div class="panel chart-panel">
+            <div class="panel-head">
+              <h2>用量占比</h2>
+              <span id="dist-legend" class="muted"></span>
+            </div>
+            <div id="chart-dist" class="echart"></div>
+            <div id="chart-dist-empty" class="empty is-hidden"></div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-head">
+            <div class="seg" id="view-seg">
+              <button type="button" class="seg-btn active" data-view="groups">按群</button>
+              <button type="button" class="seg-btn" data-view="users">按人</button>
+            </div>
+            <input id="filter" class="filter" type="search" placeholder="筛选 ID…" />
+          </div>
+          <div id="table-wrap" class="table-wrap"></div>
+        </div>
+      </section>
+
+      <!-- ===================== 历史统计 ===================== -->
+      <section id="tab-history" class="tab-panel">
+        <div class="hist-head">
+          <div class="seg" id="hist-range">
+            <button type="button" class="seg-btn" data-days="1">24 小时</button>
+            <button type="button" class="seg-btn" data-days="7">7 天</button>
+            <button type="button" class="seg-btn active" data-days="30">30 天</button>
+            <button type="button" class="seg-btn" data-days="90">90 天</button>
+            <button type="button" class="seg-btn" data-days="365">365 天</button>
+          </div>
+          <div class="seg" id="hist-metric">
+            <button type="button" class="seg-btn active" data-metric="tokens">Token</button>
+            <button type="button" class="seg-btn" data-metric="calls">调用</button>
+          </div>
+          <span id="hist-note" class="muted"></span>
+        </div>
+
+        <div id="hist-cards" class="cards"></div>
+
+        <div class="charts hist-charts">
+          <div class="panel chart-panel">
+            <div class="panel-head">
+              <h2 id="hist-trend-title">每日用量趋势</h2>
+              <span id="hist-trend-legend" class="muted"></span>
+            </div>
+            <div id="chart-hist-trend" class="echart"></div>
+            <div id="chart-hist-trend-empty" class="empty is-hidden"></div>
+          </div>
+          <div class="panel chart-panel">
+            <div class="panel-head">
+              <h2>用量排行</h2>
+              <div class="seg" id="hist-top-view">
+                <button type="button" class="seg-btn active" data-top="groups">群</button>
+                <button type="button" class="seg-btn" data-top="users">用户</button>
+              </div>
+            </div>
+            <div id="chart-hist-top" class="echart"></div>
+            <div id="chart-hist-top-empty" class="empty is-hidden"></div>
+          </div>
+          <div class="panel chart-panel">
+            <div class="panel-head">
+              <h2>用量分布</h2>
+              <div class="seg" id="hist-share-view">
+                <button type="button" class="seg-btn active" data-share="models">模型</button>
+                <button type="button" class="seg-btn" data-share="platforms">平台</button>
+              </div>
+            </div>
+            <div id="chart-hist-share" class="echart"></div>
+            <div id="chart-hist-share-empty" class="empty is-hidden"></div>
+          </div>
+          <div class="panel chart-panel">
+            <div class="panel-head">
+              <h2>时段热力</h2>
+              <span class="muted">周几 × 小时的调用分布</span>
+            </div>
+            <div id="chart-hist-heat" class="echart"></div>
+            <div id="chart-hist-heat-empty" class="empty is-hidden"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ===================== 申请与重置 ===================== -->
+      <section id="tab-requests" class="tab-panel">
+        <div class="panel">
+          <div class="panel-head">
+            <h2>重置申请</h2>
+            <div class="seg" id="req-status-seg">
+              <button type="button" class="seg-btn active" data-status="pending">待审批</button>
+              <button type="button" class="seg-btn" data-status="all">全部</button>
+            </div>
+          </div>
+          <div id="requests-body" class="table-wrap"></div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-head">
+            <h2>重置日志</h2>
+            <span class="muted">最近 100 条重置记录（含指令、自助与中台操作）</span>
+          </div>
+          <div id="resetlog-body" class="table-wrap"></div>
+        </div>
+      </section>
+
+      <!-- ===================== 配置 ===================== -->
+      <section id="tab-config" class="tab-panel">
+        <div class="panel">
+          <div class="panel-head">
+            <h2>插件配置</h2>
+            <button type="button" id="save-config" class="primary-btn">保存配置</button>
+          </div>
+          <div id="config-form" class="config-form"></div>
+          <p id="config-status" class="status"></p>
+        </div>
+      </section>
+    </main>
+
+    <!-- 编辑配额弹窗 -->
+    <div id="modal" class="modal hidden">
+      <div class="modal-card">
+        <h3 id="modal-title">编辑配额</h3>
+        <p id="modal-sub" class="muted"></p>
+        <label>调用次数上限 <small>(-1 不限，留空用默认)</small>
+          <input id="m-calls" type="number" />
+        </label>
+        <label>Token 上限 <small>(-1 不限，留空用默认)</small>
+          <input id="m-tokens" type="number" />
+        </label>
+        <label>时间窗口（小时）<small>(留空用全局默认)</small>
+          <input id="m-hours" type="number" step="0.5" min="0" />
+        </label>
+        <div class="divider">长窗口（按天锚定，到期整体归零）</div>
+        <label>长窗口调用上限 <small>(-1 不限，留空用默认)</small>
+          <input id="m-long-calls" type="number" />
+        </label>
+        <label>长窗口 Token 上限 <small>(-1 不限，留空用默认)</small>
+          <input id="m-long-tokens" type="number" />
+        </label>
+        <label>长窗口天数 <small>(留空用默认)</small>
+          <input id="m-long-days" type="number" step="0.5" min="0" />
+        </label>
+        <div class="divider">超限回退（备用模型）</div>
+        <label>备用模型 <small>(留空=继承默认)</small>
+          <select id="m-fb-provider"></select>
+        </label>
+        <label>备用·额外调用次数 <small>(留空用默认，0=调用不回退)</small>
+          <input id="m-fb-calls" type="number" min="0" />
+        </label>
+        <label>备用·额外 Token <small>(留空用默认，0=Token 不回退)</small>
+          <input id="m-fb-tokens" type="number" min="0" />
+        </label>
+        <!-- 群共享池不面向个人，故 scope=group 时整块隐藏（见 app.js openQuotaModal） -->
+        <div id="m-selfreset-block">
+          <div class="divider">自助重置次数（每个周期开始时补满）</div>
+          <label>短窗口次数 <small>(留空用默认)</small>
+            <input id="m-sr-short" type="number" min="0" />
+          </label>
+          <label>长窗口次数 <small>(留空用默认)</small>
+            <input id="m-sr-long" type="number" min="0" />
+          </label>
+        </div>
+        <label class="row"><input id="m-enabled" type="checkbox" checked /> 启用对该实体的限制</label>
+        <div class="modal-actions">
+          <button type="button" id="m-clear" class="danger-btn">清除覆盖</button>
+          <span class="spacer"></span>
+          <button type="button" id="m-cancel" class="ghost-btn">取消</button>
+          <button type="button" id="m-save" class="primary-btn">保存</button>
+        </div>
+        <p id="modal-status" class="status"></p>
+      </div>
+    </div>
+
+    <!-- 群成员弹窗 -->
+    <div id="members-modal" class="modal hidden">
+      <div class="modal-card wide">
+        <div class="modal-head">
+          <h3 id="members-title">群成员</h3>
+          <div class="modal-head-actions">
+            <button type="button" id="members-default-btn" class="ghost-btn"
+              title="设置本群「群内每个成员」的默认配额（介于全局默认与单个成员专属配额之间）">成员默认配额</button>
+            <button type="button" id="members-close" class="ghost-btn">关闭</button>
+          </div>
+        </div>
+        <p id="members-sub" class="muted"></p>
+        <div id="members-body" class="table-wrap"></div>
+      </div>
+    </div>
+
+    <!-- 群备注弹窗 -->
+    <div id="remark-modal" class="modal hidden">
+      <div class="modal-card">
+        <h3>设置群备注</h3>
+        <p id="remark-sub" class="muted"></p>
+        <label>备注 <small>(最多 64 字，留空清除)</small>
+          <input id="remark-input" type="text" maxlength="64" />
+        </label>
+        <div class="modal-actions">
+          <span class="spacer"></span>
+          <button type="button" id="remark-cancel" class="ghost-btn">取消</button>
+          <button type="button" id="remark-save" class="primary-btn">保存</button>
+        </div>
+        <p id="remark-status" class="status"></p>
+      </div>
+    </div>
+
+    <!-- 重置用量弹窗：短 / 长窗口二选一 -->
+    <div id="reset-modal" class="modal hidden">
+      <div class="modal-card">
+        <h3>重置用量</h3>
+        <p id="reset-sub" class="muted"></p>
+        <label class="pick">
+          <input type="radio" name="reset-window" value="short" checked />
+          <span>
+            <b>短窗口</b>
+            <small>清空当前短窗口用量（写重置标记）</small>
+          </span>
+        </label>
+        <label class="pick">
+          <input type="radio" name="reset-window" value="long" />
+          <span>
+            <b>长窗口</b>
+            <small>结束当前周期（下次调用开新周期，重置次数不补满）</small>
+          </span>
+        </label>
+        <div class="modal-actions">
+          <span class="spacer"></span>
+          <button type="button" id="reset-cancel" class="ghost-btn">取消</button>
+          <button type="button" id="reset-ok" class="danger-btn">确定</button>
+        </div>
+        <p id="reset-status" class="status"></p>
+      </div>
+    </div>
+
+    <!-- 发放重置次数弹窗 -->
+    <div id="grant-modal" class="modal hidden">
+      <div class="modal-card">
+        <h3>发放重置次数</h3>
+        <p id="grant-sub" class="muted"></p>
+        <label>短窗口 +N <small>(0 表示不发放)</small>
+          <input id="grant-short" type="number" min="0" step="1" value="0" />
+        </label>
+        <label>长窗口 +N <small>(0 表示不发放)</small>
+          <input id="grant-long" type="number" min="0" step="1" value="0" />
+        </label>
+        <div class="modal-actions">
+          <span class="spacer"></span>
+          <button type="button" id="grant-cancel" class="ghost-btn">取消</button>
+          <button type="button" id="grant-ok" class="primary-btn">发放</button>
+        </div>
+        <p id="grant-status" class="status"></p>
+      </div>
+    </div>
+
+    <!-- 通用输入弹窗（沙箱禁用了原生 prompt，故自建） -->
+    <div id="prompt-modal" class="modal hidden">
+      <div class="modal-card">
+        <h3 id="prompt-title">请输入</h3>
+        <label id="prompt-label-wrap" for="prompt-input"><span id="prompt-label">输入</span>
+          <input id="prompt-input" type="text" title="输入" />
+        </label>
+        <div class="modal-actions">
+          <span class="spacer"></span>
+          <button type="button" id="prompt-cancel" class="ghost-btn">取消</button>
+          <button type="button" id="prompt-ok" class="primary-btn">确定</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 通用确认弹窗（iframe 沙箱禁用了原生 confirm，故自建） -->
+    <div id="confirm-modal" class="modal hidden">
+      <div class="modal-card">
+        <h3 id="confirm-title">确认操作</h3>
+        <p id="confirm-msg" class="muted"></p>
+        <div class="modal-actions">
+          <span class="spacer"></span>
+          <button type="button" id="confirm-cancel" class="ghost-btn">取消</button>
+          <button type="button" id="confirm-ok" class="danger-btn">确定</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="toast" class="toast hidden"></div>
+
+    <!-- 本地打包的 ECharts 6.0.0；相对路径会被框架重写成带令牌的同源 URL，离线可用 -->
+    <script src="./echarts.min.js"></script>
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>
