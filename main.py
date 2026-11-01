@@ -158,6 +158,11 @@ DEFAULT_AUTO_RESET_MESSAGE = (
     "♻️ 已达{window_label}上限，自动为你使用 1 次重置"
     "（本周期剩余 {remaining} 次），本次请求继续。"
 )
+# 拦截提示默认文案（与 _conf_schema.json 的默认值保持一致）
+DEFAULT_BLOCK_MESSAGE = (
+    "⚠️ 已达使用上限：{scope_label} {window_label} {metric_label}：{used}/{limit}，"
+    "约 {reset_in} 后恢复。如需提高额度请联系管理员。"
+)
 # 自动重置后仍被其它限额拦截时的提示：次数确实扣了，但不能声称「本次请求继续」，
 # 故不套用户模板（模板默认文案带继续语），改用这句固定文案 + 随后的拦截提示。
 AUTO_RESET_PARTIAL_MESSAGE = (
@@ -993,7 +998,9 @@ class QuotaHub(QuotaApiMixin, Star):
                     event, blocked, auto_remaining, AUTO_RESET_PARTIAL_MESSAGE
                 )
             if bool(self.config.get("send_block_message", True)):
-                template = str(self.config.get("block_message", "") or "")
+                template = str(
+                    self.config.get("block_message", "") or DEFAULT_BLOCK_MESSAGE
+                )
                 try:
                     await event.send(
                         MessageChain().message(format_block_message(template, decision))
@@ -1018,6 +1025,12 @@ class QuotaHub(QuotaApiMixin, Star):
         self.writer.enqueue_insert(
             (eid, int(now), self._platform_of(event), group_id, user_id, 1, 0, model)
         )
+        # 维护待回填的 eid 队列（支持同一消息触发多次/并发 LLM 请求时按序匹配）
+        pending = getattr(event, "_quota_hub_pending_eids", None)
+        if pending is None:
+            pending = []
+            setattr(event, "_quota_hub_pending_eids", pending)
+        pending.append(eid)
         setattr(event, "_quota_hub_eid", eid)
         await self.service.persist_states(opened)
 
@@ -1186,18 +1199,83 @@ class QuotaHub(QuotaApiMixin, Star):
         except Exception as exc:  # noqa: BLE001
             logger.warning("quota_hub 发送回退提示失败: %s", exc)
 
-    @filter.on_llm_response()
-    async def _record_tokens(self, event: AstrMessageEvent, response: Any) -> None:
-        eid = getattr(event, "_quota_hub_eid", None)
-        if eid is None:
-            return
+    @staticmethod
+    def _extract_tokens(response: Any) -> int:
+        """从各类型 Provider 响应对象中稳健提取消耗的 Token 总数。"""
+        if response is None:
+            return 0
         usage = getattr(response, "usage", None)
         if usage is None:
+            raw = getattr(response, "raw_completion", None) or getattr(
+                response, "raw_response", None
+            )
+            if raw is not None:
+                usage = getattr(raw, "usage", None)
+        if usage is None:
+            return 0
+
+        # 字典结构兼容（部分自定义 Provider 返回 dict）
+        if isinstance(usage, dict):
+            for key in ("total_tokens", "total"):
+                if key in usage and usage[key] is not None:
+                    try:
+                        return max(0, int(usage[key]))
+                    except (TypeError, ValueError):
+                        pass
+            inp = (
+                usage.get("prompt_tokens")
+                or usage.get("input_tokens")
+                or usage.get("input")
+                or 0
+            )
+            out = (
+                usage.get("completion_tokens")
+                or usage.get("output_tokens")
+                or usage.get("output")
+                or 0
+            )
+            try:
+                return max(0, int(inp or 0) + int(out or 0))
+            except (TypeError, ValueError):
+                return 0
+
+        # 对象属性兼容（如 OpenAI CompletionUsage / AstrBot TokenUsage）
+        for attr in ("total_tokens", "total"):
+            val = getattr(usage, attr, None)
+            if val is not None:
+                try:
+                    return max(0, int(val))
+                except (TypeError, ValueError):
+                    pass
+
+        inp = (
+            getattr(usage, "prompt_tokens", None)
+            or getattr(usage, "input_tokens", None)
+            or getattr(usage, "input", None)
+            or 0
+        )
+        out = (
+            getattr(usage, "completion_tokens", None)
+            or getattr(usage, "output_tokens", None)
+            or getattr(usage, "output", None)
+            or 0
+        )
+        try:
+            return max(0, int(inp or 0) + int(out or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    @filter.on_llm_response()
+    async def _record_tokens(self, event: AstrMessageEvent, response: Any) -> None:
+        pending: list[int] | None = getattr(event, "_quota_hub_pending_eids", None)
+        if pending:
+            eid = pending.pop(0)
+        else:
+            eid = getattr(event, "_quota_hub_eid", None)
+        if eid is None:
             return
-        total = getattr(usage, "total", None)
-        if total is None:
-            total = (getattr(usage, "input", 0) or 0) + (getattr(usage, "output", 0) or 0)
-        total = int(total or 0)
+
+        total = self._extract_tokens(response)
         if total <= 0:
             return
         self.aggregator.add_tokens(int(eid), total)
