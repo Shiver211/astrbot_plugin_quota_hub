@@ -39,7 +39,7 @@ DURATION_UNITS: dict[str, float] = {
 _DURATION_RE = re.compile(r"(\d+(?:\.\d+)?)\s*([a-zA-Z\u4e00-\u9fa5]+)")
 
 
-def parse_duration(text: str | None) -> float | None:
+def parse_duration(text: Any) -> float | None:
     """把时长字符串解析为秒数。
 
     支持例如: '1d', '2h', '30m', '60s', '1w', '1.5d', '1天', '2小时', '30分钟', '1d12h' 等。

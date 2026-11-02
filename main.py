@@ -307,9 +307,11 @@ class QuotaHub(QuotaApiMixin, Star):
             logger.warning("quota_hub 加载封禁列表失败: %s", exc)
 
     def is_banned(
-        self, group_id: str, user_id: str, now: float | None = None
+        self, group_id: Any, user_id: Any, now: float | None = None
     ) -> BanRecord | None:
         """检查用户是否处于封禁状态。先查群成员封禁，再查全局封禁。"""
+        user_id = normalize_id(user_id)
+        group_id = normalize_id(group_id)
         if not user_id:
             return None
         if now is None:
@@ -1482,7 +1484,7 @@ class QuotaHub(QuotaApiMixin, Star):
         d: str | None = None,
         e: str | None = None,
     ):
-        scope = (scope or "").lower()
+        scope = str(scope or "").lower()
         try:
             if scope == "user":
                 if a is None or b is None or c is None:
@@ -1652,7 +1654,7 @@ class QuotaHub(QuotaApiMixin, Star):
         ``members``（群内成员默认）与 ``userdef``（用户级成员默认）只是覆盖层、
         没有自己的用量事件，故仅 clear（``allow_defaults=True``）接受，reset 不接受。
         """
-        scope = (scope or "").lower()
+        scope = str(scope or "").lower()
         if scope == "user" and a:
             return (SCOPE_PRIVATE, "", normalize_id(a))
         if scope == "group" and a:
@@ -2077,10 +2079,10 @@ class QuotaHub(QuotaApiMixin, Star):
     async def quota_remark(
         self,
         event: AstrMessageEvent,
-        group_id: str | None = None,
-        remark: str | None = None,
+        group_id: Any = None,
+        remark: Any = None,
     ):
-        if not group_id:
+        if group_id is None or not str(group_id).strip():
             yield event.plain_result(
                 "用法：/quota remark <群号> [备注]\n"
                 "备注留空则清除；含空格的备注请在数据中台设置。"
@@ -2110,9 +2112,17 @@ class QuotaHub(QuotaApiMixin, Star):
     # --- 封禁指令 -------------------------------------------------------
 
     @staticmethod
-    def _extract_target_id(event: AstrMessageEvent, candidate: str | None) -> str:
+    def _extract_target_id(event: AstrMessageEvent, candidate: Any) -> str:
         """从参数或消息中的 At 元件提取 QQ 号 / 用户 ID。"""
-        if candidate:
+        if candidate is not None:
+            at_qq = (
+                getattr(candidate, "qq", None)
+                or getattr(candidate, "target", None)
+                or getattr(candidate, "user_id", None)
+            )
+            if at_qq:
+                return normalize_id(at_qq)
+
             raw = str(candidate).strip()
             m = re.search(r"qq=(\d+)", raw)
             if m:
@@ -2141,12 +2151,12 @@ class QuotaHub(QuotaApiMixin, Star):
     async def cmd_ban(
         self,
         event: AstrMessageEvent,
-        target: str | None = None,
-        duration: str | None = None,
-        r1: str | None = None,
-        r2: str | None = None,
-        r3: str | None = None,
-        r4: str | None = None,
+        target: Any = None,
+        duration: Any = None,
+        r1: Any = None,
+        r2: Any = None,
+        r3: Any = None,
+        r4: Any = None,
     ):
         """/ban <QQ号或@成员> <时间（如1d）> [理由] —— 禁止成员与 LLM 对话。"""
         async for res in self._handle_ban(event, target, duration, [r1, r2, r3, r4]):
@@ -2157,8 +2167,8 @@ class QuotaHub(QuotaApiMixin, Star):
     async def cmd_unban(
         self,
         event: AstrMessageEvent,
-        target: str | None = None,
-        r1: str | None = None,
+        target: Any = None,
+        r1: Any = None,
     ):
         """/unban <QQ号或@成员> —— 解除成员的 LLM 对话封禁。"""
         async for res in self._handle_unban(event, target, r1):
@@ -2169,12 +2179,12 @@ class QuotaHub(QuotaApiMixin, Star):
     async def quota_ban(
         self,
         event: AstrMessageEvent,
-        target: str | None = None,
-        duration: str | None = None,
-        r1: str | None = None,
-        r2: str | None = None,
-        r3: str | None = None,
-        r4: str | None = None,
+        target: Any = None,
+        duration: Any = None,
+        r1: Any = None,
+        r2: Any = None,
+        r3: Any = None,
+        r4: Any = None,
     ):
         async for res in self._handle_ban(event, target, duration, [r1, r2, r3, r4]):
             yield res
@@ -2184,8 +2194,8 @@ class QuotaHub(QuotaApiMixin, Star):
     async def quota_unban(
         self,
         event: AstrMessageEvent,
-        target: str | None = None,
-        r1: str | None = None,
+        target: Any = None,
+        r1: Any = None,
     ):
         async for res in self._handle_unban(event, target, r1):
             yield res
@@ -2199,15 +2209,16 @@ class QuotaHub(QuotaApiMixin, Star):
     async def _handle_ban(
         self,
         event: AstrMessageEvent,
-        target: str | None,
-        duration: str | None,
-        extra_args: list[Any],
+        target: Any = None,
+        duration: Any = None,
+        extra_args: list[Any] | None = None,
     ):
         if not event.is_admin():
             yield event.plain_result(ADMIN_ONLY_TIP)
             return
 
-        if not target or target.lower() in ("help", "-h", "--help"):
+        target_str = str(target).strip() if target is not None else ""
+        if not target_str or target_str.lower() in ("help", "-h", "--help"):
             yield event.plain_result(
                 "用法：/ban <QQ号或@成员> <时间（如1d）> [理由]\n"
                 "示例：\n"
@@ -2219,7 +2230,7 @@ class QuotaHub(QuotaApiMixin, Star):
             )
             return
 
-        if target.lower() == "list":
+        if target_str.lower() == "list":
             async for res in self._handle_banlist(event):
                 yield res
             return
@@ -2228,6 +2239,7 @@ class QuotaHub(QuotaApiMixin, Star):
         dur_seconds: float | None = None
         group_id = normalize_id(event.get_group_id())
         reason = ""
+        extra_args = extra_args or []
 
         test_dur = parse_duration(duration)
         if test_dur is not None:
@@ -2302,15 +2314,16 @@ class QuotaHub(QuotaApiMixin, Star):
     async def _handle_unban(
         self,
         event: AstrMessageEvent,
-        target: str | None,
-        extra_arg: str | None = None,
+        target: Any = None,
+        extra_arg: Any = None,
     ):
         if not event.is_admin():
             yield event.plain_result(ADMIN_ONLY_TIP)
             return
 
-        if not target:
-            yield event.plain_result("用法：/unban <QQ号或@成员>")
+        target_str = str(target).strip() if target is not None else ""
+        if not target_str or target_str.lower() in ("help", "-h", "--help"):
+            yield event.plain_result("用法：/unban <QQ号或@成员>\n　　　/unban <群号> <QQ号或@成员>")
             return
 
         group_id = normalize_id(event.get_group_id())
@@ -2393,14 +2406,14 @@ class QuotaHub(QuotaApiMixin, Star):
     async def _mutate_list(
         self,
         event: AstrMessageEvent,
-        action: str | None,
-        kind: str | None,
-        ident: str | None,
+        action: Any,
+        kind: Any,
+        ident: Any,
         group_key: str,
         user_key: str,
     ):
-        action = (action or "").lower()
-        kind = (kind or "").lower()
+        action = str(action or "").lower()
+        kind = str(kind or "").lower()
         ident = normalize_id(ident)
         if action not in ("add", "del") or kind not in ("group", "user") or not ident:
             yield event.plain_result("用法：add|del group|user <ID>")

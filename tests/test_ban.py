@@ -350,3 +350,68 @@ async def test_global_ban_and_unban_by_zero(temp_hub: QuotaHub):
     ]
     assert "✅ 已解除 user_glob 的 LLM 对话封禁" in unban_results[0]
     assert temp_hub.is_banned("g1", "user_glob") is None
+
+
+@pytest.mark.asyncio
+async def test_ban_with_int_target_and_duration(temp_hub: QuotaHub):
+    """测试 target 和 duration 作为 int 传入时（AstrBot 指令参数自动类型解析场景）。"""
+    admin_event = DummyEvent(group_id="g1", user_id="admin1", is_admin_user=True)
+
+    # 1. 模拟 /ban 2863677073 1s（用户实际报错场景：target 为 int）
+    results = [
+        res
+        async for res in temp_hub.cmd_ban(admin_event, 2863677073, "1s")
+    ]
+    assert len(results) == 1
+    assert "✅ 已禁止 群 g1 成员 2863677073 与 LLM 对话" in results[0]
+    assert "时长 1秒" in results[0]
+    assert temp_hub.is_banned("g1", 2863677073) is not None
+    assert temp_hub.is_banned("g1", "2863677073") is not None
+
+    # 2. 模拟 duration 为 int（如 /ban 2863677073 60）
+    results_dur_int = [
+        res
+        async for res in temp_hub.cmd_ban(admin_event, 2863677073, 60)
+    ]
+    assert len(results_dur_int) == 1
+    assert "1分钟" in results_dur_int[0]
+
+    # 3. 模拟 /unban 2863677073（target 为 int）
+    unban_res = [
+        res
+        async for res in temp_hub.cmd_unban(admin_event, 2863677073)
+    ]
+    assert len(unban_res) == 1
+    assert "✅ 已解除 2863677073 的 LLM 对话封禁" in unban_res[0]
+    assert temp_hub.is_banned("g1", 2863677073) is None
+
+    # 4. 模拟 duration 为 0（int 类型的 0 解封）
+    # 先封禁
+    async for _ in temp_hub.cmd_ban(admin_event, 2863677073, "10s"):
+        pass
+    assert temp_hub.is_banned("g1", 2863677073) is not None
+    # duration = 0 解封
+    unban_zero_res = [
+        res
+        async for res in temp_hub.cmd_ban(admin_event, 2863677073, 0)
+    ]
+    assert len(unban_zero_res) == 1
+    assert "✅ 已解除 2863677073 的 LLM 对话封禁" in unban_zero_res[0]
+    assert temp_hub.is_banned("g1", 2863677073) is None
+
+    # 5. 模拟 target 直接是 At 元件对象
+    at_obj = type("AtComp", (), {"qq": 2863677073})()
+    at_results = [
+        res
+        async for res in temp_hub.cmd_ban(admin_event, at_obj, "5s")
+    ]
+    assert len(at_results) == 1
+    assert "2863677073" in at_results[0]
+    assert temp_hub.is_banned("g1", 2863677073) is not None
+
+    # 6. 帮助与查看封禁列表
+    help_res = [res async for res in temp_hub.cmd_ban(admin_event, "help")]
+    assert "用法：" in help_res[0]
+
+    list_res = [res async for res in temp_hub.cmd_ban(admin_event, "list")]
+    assert "当前 LLM 对话封禁名单" in list_res[0]
