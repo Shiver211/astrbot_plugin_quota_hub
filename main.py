@@ -211,6 +211,7 @@ def _event_message_type(msg_type: Any, priority: int = 0):
         return lambda fn: fn
     return deco(msg_type, priority=priority)
 
+
 HELP_TEXT = (
     "📊 配额中枢指令：\n"
     "/quota me —— 查询自己的用量、剩余重置次数与申请状态\n"
@@ -1037,6 +1038,9 @@ class QuotaHub(QuotaApiMixin, Star):
         sid = getattr(event, "self_id", None)
         if sid:
             return normalize_id(sid)
+        msg_obj = getattr(event, "message_obj", None)
+        if msg_obj and getattr(msg_obj, "self_id", None):
+            return normalize_id(msg_obj.self_id)
         try:
             platform_mgr = getattr(self.context, "platform_manager", None)
             if platform_mgr and hasattr(platform_mgr, "get_insts"):
@@ -1059,6 +1063,7 @@ class QuotaHub(QuotaApiMixin, Star):
                         getattr(comp, "qq", None)
                         or getattr(comp, "target", None)
                         or getattr(comp, "user_id", None)
+                        or getattr(comp, "uid", None)
                     )
                     target_id = normalize_id(target)
                     if self_id and target_id == self_id:
@@ -1077,23 +1082,34 @@ class QuotaHub(QuotaApiMixin, Star):
 
     def _is_command_or_wake(self, event: AstrMessageEvent) -> bool:
         """检查消息是否属于指令、唤醒或对 Bot 的主动交互。"""
-        # 1. 私聊：发送给 Bot 的任何消息均视为交互
+        # 1. 私聊：发送给 Bot 的任何消息均视为对 Bot 的交互
+        checker = getattr(event, "is_private_chat", None)
+        if callable(checker):
+            try:
+                if checker():
+                    return True
+            except Exception:  # noqa: BLE001
+                pass
         group_id = normalize_id(event.get_group_id())
         if not group_id:
             return True
 
-        # 2. 框架已认定的唤醒状态
-        if getattr(event, "is_wake", False):
-            return True
+        # 2. 框架明确判定的显式唤醒指令标志
+        # 注意：切勿使用 event.is_wake，因为在 AstrBot 中只要任意插件过滤器命中，
+        # WakingCheckStage 就会将 event.is_wake 赋为 True，会导致普通闲聊也被误判为唤醒！
         if getattr(event, "is_at_or_wake_command", False):
             return True
 
-        # 3. 常见指令前缀或唤醒前缀
+        # 3. 检查是否 @ 当前 Bot 或回复当前 Bot
+        if self._is_at_or_reply_to_bot(event):
+            return True
+
+        # 4. 常见指令前缀或唤醒前缀
         text = (event.get_message_str() or "").strip()
         if text:
             prefixes = ["/", "!", "！", ".", "。", "#", "\\"]
             for sp in self.config.get("skip_prefixes") or []:
-                if sp and sp not in prefixes:
+                if sp and str(sp) not in prefixes:
                     prefixes.append(str(sp))
             try:
                 cfg_getter = getattr(self.context, "get_config", None)
@@ -1104,23 +1120,19 @@ class QuotaHub(QuotaApiMixin, Star):
                         wake_prefixes = global_cfg.get("wake_prefix")
                         if isinstance(wake_prefixes, list):
                             for wp in wake_prefixes:
-                                if wp and wp not in prefixes:
+                                if wp and str(wp) not in prefixes:
                                     prefixes.append(str(wp))
                         elif (
                             isinstance(wake_prefixes, str)
                             and wake_prefixes
-                            and wake_prefixes not in prefixes
+                            and str(wake_prefixes) not in prefixes
                         ):
-                            prefixes.append(wake_prefixes)
+                            prefixes.append(str(wake_prefixes))
             except Exception:  # noqa: BLE001
                 pass
 
-            if any(text.startswith(p) for p in prefixes):
+            if any(p and text.startswith(p) for p in prefixes):
                 return True
-
-        # 4. @Bot 或回复 Bot
-        if self._is_at_or_reply_to_bot(event):
-            return True
 
         return False
 
@@ -1139,11 +1151,15 @@ class QuotaHub(QuotaApiMixin, Star):
         if ban is None:
             return
 
-        # 无论是否显式唤醒，只要被封禁，立即停止该事件继续向后传播（阻断任何指令与插件触发）
+        # 仅当属于指令、唤醒或私聊交互时才拦截并处理
+        # 群聊普通闲聊/表情包静默放行，切勿拦截或发提示刷屏，更不能让 Bot 回复
+        if not self._is_command_or_wake(event):
+            return
+
+        # 确认为指令或唤醒：立即停止该事件继续向后传播（阻断任何指令与插件触发）
         event.stop_event()
 
-        # 仅当检测到主动交互（指令、唤醒、私聊）时发送封禁提示，避免在群普通闲聊中刷屏
-        if bool(self.config.get("send_ban_message", True)) and self._is_command_or_wake(event):
+        if bool(self.config.get("send_ban_message", True)):
             if not getattr(event, "_quota_hub_ban_notified", False):
                 setattr(event, "_quota_hub_ban_notified", True)
                 ban_tip = self._format_ban_tip(ban, now)
@@ -2489,7 +2505,7 @@ class QuotaHub(QuotaApiMixin, Star):
         scope_desc = f"群 {group_id} 成员" if group_id else "用户（全局）"
         reason_desc = f"，理由：{reason}" if reason else ""
         yield event.plain_result(
-            f"✅ 已禁止 {scope_desc} {target_id} 与 LLM 对话及使用任何指令、唤醒 {time_desc}{reason_desc}"
+            f"✅ 已禁止 {scope_desc} {target_id} 与 LLM 对话及交互 {time_desc}{reason_desc}"
         )
 
     async def _handle_unban(
@@ -2535,7 +2551,7 @@ class QuotaHub(QuotaApiMixin, Star):
             removed_any = True
 
         if removed_any:
-            yield event.plain_result(f"✅ 已解除 {target_id} 的 LLM 对话封禁（已恢复指令与唤醒）")
+            yield event.plain_result(f"✅ 已解除 {target_id} 的封禁")
         else:
             yield event.plain_result(f"⚠️ 未找到 {target_id} 的有效封禁记录")
 
@@ -2557,7 +2573,7 @@ class QuotaHub(QuotaApiMixin, Star):
             yield event.plain_result("✅ 当前没有被禁止对话的成员")
             return
 
-        lines = ["📋 当前 LLM 对话封禁名单（含指令与唤醒）："]
+        lines = ["📋 当前封禁名单："]
         for b in active_bans:
             scope_desc = f"群 {b.group_id} 成员" if b.group_id else "全局"
             if b.is_permanent:

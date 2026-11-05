@@ -117,6 +117,9 @@ class DummyEvent:
         self.is_at_or_wake_command = False
         self.self_id = ""
 
+    def is_private_chat(self) -> bool:
+        return not bool(self.group_id)
+
     def get_group_id(self) -> str:
         return self.group_id
 
@@ -280,7 +283,7 @@ async def test_ban_and_llm_interception_workflow(temp_hub: QuotaHub, monkeypatch
         async for res in temp_hub.cmd_unban(admin_event, "123456")
     ]
     assert len(unban_results) == 1
-    assert "✅ 已解除 123456 的 LLM 对话封禁" in unban_results[0]
+    assert "✅ 已解除 123456 的封禁" in unban_results[0]
 
     # 解封后再次请求 LLM，正常放行
     member_event2 = DummyEvent(group_id="g1", user_id="123456", text="你好2")
@@ -354,7 +357,7 @@ async def test_global_ban_and_unban_by_zero(temp_hub: QuotaHub):
         res
         async for res in temp_hub.cmd_ban(admin_event, "user_glob", "0")
     ]
-    assert "✅ 已解除 user_glob 的 LLM 对话封禁" in unban_results[0]
+    assert "✅ 已解除 user_glob 的封禁" in unban_results[0]
     assert temp_hub.is_banned("g1", "user_glob") is None
 
 
@@ -388,7 +391,7 @@ async def test_ban_with_int_target_and_duration(temp_hub: QuotaHub):
         async for res in temp_hub.cmd_unban(admin_event, 2863677073)
     ]
     assert len(unban_res) == 1
-    assert "✅ 已解除 2863677073 的 LLM 对话封禁" in unban_res[0]
+    assert "✅ 已解除 2863677073 的封禁" in unban_res[0]
     assert temp_hub.is_banned("g1", 2863677073) is None
 
     # 4. 模拟 duration 为 0（int 类型的 0 解封）
@@ -402,7 +405,7 @@ async def test_ban_with_int_target_and_duration(temp_hub: QuotaHub):
         async for res in temp_hub.cmd_ban(admin_event, 2863677073, 0)
     ]
     assert len(unban_zero_res) == 1
-    assert "✅ 已解除 2863677073 的 LLM 对话封禁" in unban_zero_res[0]
+    assert "✅ 已解除 2863677073 的封禁" in unban_zero_res[0]
     assert temp_hub.is_banned("g1", 2863677073) is None
 
     # 5. 模拟 target 直接是 At 元件对象
@@ -420,7 +423,7 @@ async def test_ban_with_int_target_and_duration(temp_hub: QuotaHub):
     assert "用法：" in help_res[0]
 
     list_res = [res async for res in temp_hub.cmd_ban(admin_event, "list")]
-    assert "当前 LLM 对话封禁名单" in list_res[0]
+    assert "当前封禁名单" in list_res[0]
 
 
 @pytest.mark.asyncio
@@ -469,13 +472,15 @@ async def test_ban_wake_up_interception(temp_hub: QuotaHub, monkeypatch: pytest.
     async for _ in temp_hub.cmd_ban(admin_event, "u_wake", "1d", "禁止唤醒"):
         pass
 
-    # 1. event.is_wake = True 标志唤醒
-    event_wake = DummyEvent(group_id="g1", user_id="u_wake", text="你好机器人")
-    event_wake.is_wake = True
-    await temp_hub._intercept_banned_message(event_wake)
-    assert event_wake.stopped is True
-    assert len(event_wake.sent_messages) == 1
-    assert "🚫 你已被管理员禁止与 LLM 对话及交互至" in str(event_wake.sent_messages[0].parts)
+    # 1. 唤醒前缀 / wake_prefix 唤醒
+    temp_hub.context = type("MockCtx", (), {
+        "get_config": lambda *a, **kw: {"wake_prefix": ["bot", "猫猫"]}
+    })()
+    event_wake_prefix = DummyEvent(group_id="g1", user_id="u_wake", text="bot 你好机器人")
+    await temp_hub._intercept_banned_message(event_wake_prefix)
+    assert event_wake_prefix.stopped is True
+    assert len(event_wake_prefix.sent_messages) == 1
+    assert "🚫 你已被管理员禁止与 LLM 对话及交互至" in str(event_wake_prefix.sent_messages[0].parts)
 
     # 2. event.is_at_or_wake_command = True
     event_wake_cmd = DummyEvent(group_id="g1", user_id="u_wake", text="查天气")
@@ -522,11 +527,26 @@ async def test_ban_private_chat_and_group_normal_chat(temp_hub: QuotaHub, monkey
     assert "🚫 你已被管理员禁止与 LLM 对话及交互至" in str(private_event.sent_messages[0].parts)
 
     # 2. 群聊普通闲聊场景：既非指令也未唤醒 Bot
-    # 阻断该事件继续流向其他插件，但【不】在群里发封禁提示，避免打扰群内正常交流
+    # 不阻断群内闲聊，更不发送封禁提示，避免打扰群内正常交流或产生误触发
     chat_event = DummyEvent(group_id="g1", user_id="u_glob_test", text="明天中午大家一起吃肯德基吗？")
     await temp_hub._intercept_banned_message(chat_event)
-    assert chat_event.stopped is True
+    assert chat_event.stopped is False, "群聊普通闲聊不应被拦截"
     assert len(chat_event.sent_messages) == 0, "群聊普通闲聊不应发送封禁提醒刷屏"
+
+    # 3. 群聊表情包 / 纯图片场景（text 为空，图片组件）：静默放行，不触发封禁提示
+    sticker_event = DummyEvent(group_id="g1", user_id="u_glob_test", text="")
+    img_comp = type("ImageComp", (), {})()
+    sticker_event.message_obj = type("MsgObj", (), {"message": [img_comp]})()
+    await temp_hub._intercept_banned_message(sticker_event)
+    assert sticker_event.stopped is False, "表情包/纯图片不应被拦截"
+    assert len(sticker_event.sent_messages) == 0, "表情包/纯图片不应发送封禁提醒"
+
+    # 4. 单独发送问号 "?" 或普通文本（无唤醒词、无指令前缀）：不触发封禁提示
+    for normal_text in ("?", "？", "还有主动回复", "今天天气真好"):
+        txt_event = DummyEvent(group_id="g1", user_id="u_glob_test", text=normal_text)
+        await temp_hub._intercept_banned_message(txt_event)
+        assert txt_event.stopped is False, f"普通文本 {normal_text} 不应被拦截"
+        assert len(txt_event.sent_messages) == 0, f"普通文本 {normal_text} 不应发送封禁提醒"
 
 
 @pytest.mark.asyncio

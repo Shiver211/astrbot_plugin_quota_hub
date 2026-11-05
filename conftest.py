@@ -32,6 +32,9 @@ if "astrbot" not in sys.modules:
             self.self_id = ""
             self.message_obj = None
 
+        def is_private_chat(self):
+            return not bool(self.group_id)
+
         def get_group_id(self):
             return self.group_id
 
