@@ -18,7 +18,18 @@ from typing import Any
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
-from astrbot.api.event.filter import PermissionType
+
+try:
+    from astrbot.api.event.filter import EventMessageType, PermissionType
+except ImportError:
+    from astrbot.api.event.filter import PermissionType  # type: ignore[no-redef]
+
+    EventMessageType = getattr(filter, "EventMessageType", None)  # type: ignore[assignment]
+    if EventMessageType is None:
+        class EventMessageType:  # type: ignore[no-redef]
+            ALL = "ALL"
+            GROUP_MESSAGE = "GROUP_MESSAGE"
+            PRIVATE_MESSAGE = "PRIVATE_MESSAGE"
 from astrbot.core.message.message_event_result import MessageChain, MessageEventResult
 
 try:
@@ -192,14 +203,22 @@ def _on_waiting_llm_request(priority: int):
         return lambda fn: fn
     return deco(priority=priority)
 
+
+def _event_message_type(msg_type: Any, priority: int = 0):
+    """``event_message_type`` 装饰器；旧版 AstrBot 缺失时退化为普通方法。"""
+    deco = getattr(filter, "event_message_type", None)
+    if deco is None:
+        return lambda fn: fn
+    return deco(msg_type, priority=priority)
+
 HELP_TEXT = (
     "📊 配额中枢指令：\n"
     "/quota me —— 查询自己的用量、剩余重置次数与申请状态\n"
     "/quota reset me [long] —— 自助重置自己的短 / 长窗口（消耗重置次数）\n"
     "/quota request short|long [数量] [理由] —— 申请追加重置次数\n"
     "（以下需管理员）\n"
-    "/ban <QQ号或@成员> <时间（如1d）> [理由] —— 禁止成员与 LLM 对话\n"
-    "/unban <QQ号或@成员> —— 解除成员的 LLM 对话封禁\n"
+    "/ban <QQ号或@成员> <时间（如1d）> [理由] —— 禁止成员使用指令、唤醒与 LLM 对话\n"
+    "/unban <QQ号或@成员> —— 解除成员的封禁\n"
     "/ban list —— 查看当前处于封禁中的成员列表\n"
     "/quota set user|group|member|members|userdef <...> <次数> <Token> [小时]\n"
     "  members=某群全体成员默认，userdef=该用户在所有群的成员默认\n"
@@ -995,6 +1014,152 @@ class QuotaHub(QuotaApiMixin, Star):
 
     # --- 运行期拦截 -----------------------------------------------------
 
+    def _format_ban_tip(self, ban: BanRecord, now: float) -> str:
+        expire_str = "永久" if ban.is_permanent else self._fmt_time_full(ban.expire_at)
+        remaining_str = ""
+        if not ban.is_permanent:
+            remaining_str = f"（剩余约 {format_duration(ban.expire_at - now)}）"
+        reason_str = f"，理由：{ban.reason}" if ban.reason else ""
+        return (
+            f"🚫 你已被管理员禁止与 LLM 对话及交互至 "
+            f"{expire_str}{remaining_str}{reason_str}"
+        )
+
+    def _get_self_id(self, event: AstrMessageEvent) -> str:
+        getter = getattr(event, "get_self_id", None)
+        if callable(getter):
+            try:
+                sid = getter()
+                if sid:
+                    return normalize_id(sid)
+            except Exception:  # noqa: BLE001
+                pass
+        sid = getattr(event, "self_id", None)
+        if sid:
+            return normalize_id(sid)
+        try:
+            platform_mgr = getattr(self.context, "platform_manager", None)
+            if platform_mgr and hasattr(platform_mgr, "get_insts"):
+                for inst in platform_mgr.get_insts():
+                    bid = getattr(inst, "bot_id", None) or getattr(inst, "self_id", None)
+                    if bid:
+                        return normalize_id(bid)
+        except Exception:  # noqa: BLE001
+            pass
+        return ""
+
+    def _is_at_or_reply_to_bot(self, event: AstrMessageEvent) -> bool:
+        self_id = self._get_self_id(event)
+        msg_obj = getattr(event, "message_obj", None)
+        if msg_obj and hasattr(msg_obj, "message"):
+            for comp in getattr(msg_obj, "message", []):
+                cname = comp.__class__.__name__
+                if cname == "At" or cname.startswith("At"):
+                    target = (
+                        getattr(comp, "qq", None)
+                        or getattr(comp, "target", None)
+                        or getattr(comp, "user_id", None)
+                    )
+                    target_id = normalize_id(target)
+                    if self_id and target_id == self_id:
+                        return True
+                    if str(target).lower() in ("all", "-1") or getattr(comp, "is_at_all", False):
+                        return True
+                elif cname in ("Reply", "Quote") or cname.startswith(("Reply", "Quote")):
+                    reply_sender = (
+                        getattr(comp, "sender", None)
+                        or getattr(comp, "user_id", None)
+                        or getattr(comp, "sender_id", None)
+                    )
+                    if self_id and normalize_id(reply_sender) == self_id:
+                        return True
+        return False
+
+    def _is_command_or_wake(self, event: AstrMessageEvent) -> bool:
+        """检查消息是否属于指令、唤醒或对 Bot 的主动交互。"""
+        # 1. 私聊：发送给 Bot 的任何消息均视为交互
+        group_id = normalize_id(event.get_group_id())
+        if not group_id:
+            return True
+
+        # 2. 框架已认定的唤醒状态
+        if getattr(event, "is_wake", False):
+            return True
+        if getattr(event, "is_at_or_wake_command", False):
+            return True
+
+        # 3. 常见指令前缀或唤醒前缀
+        text = (event.get_message_str() or "").strip()
+        if text:
+            prefixes = ["/", "!", "！", ".", "。", "#", "\\"]
+            for sp in self.config.get("skip_prefixes") or []:
+                if sp and sp not in prefixes:
+                    prefixes.append(str(sp))
+            try:
+                cfg_getter = getattr(self.context, "get_config", None)
+                if callable(cfg_getter):
+                    umo = getattr(event, "unified_msg_origin", None)
+                    global_cfg = cfg_getter(umo=umo) if umo else cfg_getter()
+                    if isinstance(global_cfg, dict):
+                        wake_prefixes = global_cfg.get("wake_prefix")
+                        if isinstance(wake_prefixes, list):
+                            for wp in wake_prefixes:
+                                if wp and wp not in prefixes:
+                                    prefixes.append(str(wp))
+                        elif (
+                            isinstance(wake_prefixes, str)
+                            and wake_prefixes
+                            and wake_prefixes not in prefixes
+                        ):
+                            prefixes.append(wake_prefixes)
+            except Exception:  # noqa: BLE001
+                pass
+
+            if any(text.startswith(p) for p in prefixes):
+                return True
+
+        # 4. @Bot 或回复 Bot
+        if self._is_at_or_reply_to_bot(event):
+            return True
+
+        return False
+
+    @_event_message_type(getattr(EventMessageType, "ALL", "ALL"), priority=1000)
+    async def _intercept_banned_message(self, event: AstrMessageEvent) -> None:
+        """在所有指令与消息处理器之前拦截被封禁用户的消息（禁用任何指令或唤醒）。"""
+        if not bool(self.config.get("enabled", True)):
+            return
+        group_id = normalize_id(event.get_group_id())
+        user_id = normalize_id(event.get_sender_id())
+        if not user_id:
+            return
+
+        now = self._now()
+        ban = self.is_banned(group_id, user_id, now)
+        if ban is None:
+            return
+
+        # 无论是否显式唤醒，只要被封禁，立即停止该事件继续向后传播（阻断任何指令与插件触发）
+        event.stop_event()
+
+        # 仅当检测到主动交互（指令、唤醒、私聊）时发送封禁提示，避免在群普通闲聊中刷屏
+        if bool(self.config.get("send_ban_message", True)) and self._is_command_or_wake(event):
+            if not getattr(event, "_quota_hub_ban_notified", False):
+                setattr(event, "_quota_hub_ban_notified", True)
+                ban_tip = self._format_ban_tip(ban, now)
+                try:
+                    await event.send(MessageChain().message(ban_tip))
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("quota_hub 发送封禁提示失败: %s", exc)
+
+        logger.info(
+            "quota_hub 封禁拦截(指令/唤醒) group=%s user=%s expire_at=%s reason=%s",
+            group_id,
+            user_id,
+            ban.expire_at,
+            ban.reason,
+        )
+
     @_on_waiting_llm_request(priority=900)
     async def _preselect_fallback(self, event: AstrMessageEvent) -> None:
         """在 AstrBot 选择供应商之前预切换备用模型。
@@ -1038,16 +1203,13 @@ class QuotaHub(QuotaApiMixin, Star):
         ban = self.is_banned(group_id, user_id, now)
         if ban is not None:
             if bool(self.config.get("send_ban_message", True)):
-                expire_str = "永久" if ban.is_permanent else self._fmt_time_full(ban.expire_at)
-                remaining_str = ""
-                if not ban.is_permanent:
-                    remaining_str = f"（剩余约 {format_duration(ban.expire_at - now)}）"
-                reason_str = f"，理由：{ban.reason}" if ban.reason else ""
-                ban_tip = f"🚫 你已被管理员禁止与 LLM 对话至 {expire_str}{remaining_str}{reason_str}"
-                try:
-                    await event.send(MessageChain().message(ban_tip))
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning("quota_hub 发送封禁提示失败: %s", exc)
+                if not getattr(event, "_quota_hub_ban_notified", False):
+                    setattr(event, "_quota_hub_ban_notified", True)
+                    ban_tip = self._format_ban_tip(ban, now)
+                    try:
+                        await event.send(MessageChain().message(ban_tip))
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("quota_hub 发送封禁提示失败: %s", exc)
             event.stop_event()
             logger.info(
                 "quota_hub 封禁拦截 group=%s user=%s expire_at=%s reason=%s",
@@ -1394,7 +1556,7 @@ class QuotaHub(QuotaApiMixin, Star):
             expire_str = "永久" if ban.is_permanent else self._fmt_time_full(ban.expire_at)
             rem = f"（剩余约 {format_duration(ban.expire_at - now)}）" if not ban.is_permanent else ""
             rsn = f"，理由：{ban.reason}" if ban.reason else ""
-            lines.append(f"· 🚫 封禁状态：已被禁止与 LLM 对话至 {expire_str}{rem}{rsn}")
+            lines.append(f"· 🚫 封禁状态：已被禁止与 LLM 对话及交互至 {expire_str}{rem}{rsn}")
         for key in keys:
             lines.extend(self._status_lines(key, now))
         # 自助重置次数与申请状态只针对「自己」的实体：群里是成员实体，私聊是私聊实体
@@ -1591,11 +1753,20 @@ class QuotaHub(QuotaApiMixin, Star):
 
     async def _self_reset(self, event: AstrMessageEvent, window: str):
         """自助重置：受 allow_self_reset 与前置条件约束，消耗一次重置次数。"""
+        group_id = normalize_id(event.get_group_id())
+        user_id = normalize_id(event.get_sender_id())
+        if user_id:
+            now = self._now()
+            ban = self.is_banned(group_id, user_id, now)
+            if ban is not None:
+                event.stop_event()
+                if bool(self.config.get("send_ban_message", True)):
+                    yield event.plain_result(self._format_ban_tip(ban, now))
+                return
+
         if not self._config_bool("allow_self_reset", False):
             yield event.plain_result("⚠️ 管理员未开放自助重置")
             return
-        group_id = normalize_id(event.get_group_id())
-        user_id = normalize_id(event.get_sender_id())
         if not user_id:
             yield event.plain_result("⚠️ 无法识别你的用户 ID")
             return
@@ -1682,6 +1853,17 @@ class QuotaHub(QuotaApiMixin, Star):
     ):
         """``/quota request short|long [数量] [理由]``：向管理员申请追加重置次数。"""
         usage = "用法：/quota request short|long [数量] [理由]"
+        user_id = normalize_id(event.get_sender_id())
+        group_id = normalize_id(event.get_group_id())
+        if user_id:
+            now = self._now()
+            ban = self.is_banned(group_id, user_id, now)
+            if ban is not None:
+                event.stop_event()
+                if bool(self.config.get("send_ban_message", True)):
+                    yield event.plain_result(self._format_ban_tip(ban, now))
+                return
+
         # 开关关闭时立即回复：不推进周期、不查库，避免被随手刷指令拖累
         if not self._config_bool("allow_reset_request", False):
             yield event.plain_result("⚠️ 管理员未开放重置次数申请")
@@ -1691,7 +1873,6 @@ class QuotaHub(QuotaApiMixin, Star):
         except (TypeError, ValueError):
             yield event.plain_result(usage)
             return
-        user_id = normalize_id(event.get_sender_id())
         if not user_id:
             yield event.plain_result("⚠️ 无法识别你的用户 ID")
             return
@@ -2308,7 +2489,7 @@ class QuotaHub(QuotaApiMixin, Star):
         scope_desc = f"群 {group_id} 成员" if group_id else "用户（全局）"
         reason_desc = f"，理由：{reason}" if reason else ""
         yield event.plain_result(
-            f"✅ 已禁止 {scope_desc} {target_id} 与 LLM 对话 {time_desc}{reason_desc}"
+            f"✅ 已禁止 {scope_desc} {target_id} 与 LLM 对话及使用任何指令、唤醒 {time_desc}{reason_desc}"
         )
 
     async def _handle_unban(
@@ -2354,7 +2535,7 @@ class QuotaHub(QuotaApiMixin, Star):
             removed_any = True
 
         if removed_any:
-            yield event.plain_result(f"✅ 已解除 {target_id} 的 LLM 对话封禁")
+            yield event.plain_result(f"✅ 已解除 {target_id} 的 LLM 对话封禁（已恢复指令与唤醒）")
         else:
             yield event.plain_result(f"⚠️ 未找到 {target_id} 的有效封禁记录")
 
@@ -2376,7 +2557,7 @@ class QuotaHub(QuotaApiMixin, Star):
             yield event.plain_result("✅ 当前没有被禁止对话的成员")
             return
 
-        lines = ["📋 当前 LLM 对话封禁名单："]
+        lines = ["📋 当前 LLM 对话封禁名单（含指令与唤醒）："]
         for b in active_bans:
             scope_desc = f"群 {b.group_id} 成员" if b.group_id else "全局"
             if b.is_permanent:

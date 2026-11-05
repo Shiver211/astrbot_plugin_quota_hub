@@ -113,12 +113,18 @@ class DummyEvent:
         self.stopped = False
         self.sent_messages: list[Any] = []
         self.message_obj = None
+        self.is_wake = False
+        self.is_at_or_wake_command = False
+        self.self_id = ""
 
     def get_group_id(self) -> str:
         return self.group_id
 
     def get_sender_id(self) -> str:
         return self.user_id
+
+    def get_self_id(self) -> str:
+        return getattr(self, "self_id", "")
 
     def get_sender_name(self) -> str:
         return f"User_{self.user_id}"
@@ -415,3 +421,194 @@ async def test_ban_with_int_target_and_duration(temp_hub: QuotaHub):
 
     list_res = [res async for res in temp_hub.cmd_ban(admin_event, "list")]
     assert "当前 LLM 对话封禁名单" in list_res[0]
+
+
+@pytest.mark.asyncio
+async def test_ban_command_interception(temp_hub: QuotaHub, monkeypatch: pytest.MonkeyPatch):
+    """测试被封禁用户的任何指令均被拦截，非封禁用户正常放行。"""
+    current_time = 1000000.0
+    monkeypatch.setattr(temp_hub, "_now", lambda: current_time)
+
+    admin_event = DummyEvent(group_id="g1", user_id="admin1", is_admin_user=True)
+    async for _ in temp_hub.cmd_ban(admin_event, "u_cmd", "1d", "禁止使用指令"):
+        pass
+
+    assert temp_hub.is_banned("g1", "u_cmd") is not None
+
+    # 1. 尝试以 "/" 开头的各类指令
+    for cmd_text in ("/quota me", "/help", "/pixiv", "/ban", "/custom_cmd"):
+        event = DummyEvent(group_id="g1", user_id="u_cmd", text=cmd_text)
+        await temp_hub._intercept_banned_message(event)
+        assert event.stopped is True, f"指令 {cmd_text} 应被拦截"
+        assert len(event.sent_messages) == 1
+        msg = str(event.sent_messages[0].parts)
+        assert "🚫 你已被管理员禁止与 LLM 对话及交互至" in msg
+        assert "禁止使用指令" in msg
+
+    # 2. 尝试以其他常见指令前缀开头的指令（如 !, #）
+    for cmd_text in ("!help", "#sign"):
+        event = DummyEvent(group_id="g1", user_id="u_cmd", text=cmd_text)
+        await temp_hub._intercept_banned_message(event)
+        assert event.stopped is True
+        assert len(event.sent_messages) == 1
+
+    # 3. 正常未封禁用户发送指令不被拦截
+    normal_event = DummyEvent(group_id="g1", user_id="u_normal", text="/help")
+    await temp_hub._intercept_banned_message(normal_event)
+    assert normal_event.stopped is False
+    assert len(normal_event.sent_messages) == 0
+
+
+@pytest.mark.asyncio
+async def test_ban_wake_up_interception(temp_hub: QuotaHub, monkeypatch: pytest.MonkeyPatch):
+    """测试被封禁用户的唤醒行为被拦截（is_wake, @Bot, 回复Bot）。"""
+    current_time = 1000000.0
+    monkeypatch.setattr(temp_hub, "_now", lambda: current_time)
+
+    admin_event = DummyEvent(group_id="g1", user_id="admin1", is_admin_user=True)
+    async for _ in temp_hub.cmd_ban(admin_event, "u_wake", "1d", "禁止唤醒"):
+        pass
+
+    # 1. event.is_wake = True 标志唤醒
+    event_wake = DummyEvent(group_id="g1", user_id="u_wake", text="你好机器人")
+    event_wake.is_wake = True
+    await temp_hub._intercept_banned_message(event_wake)
+    assert event_wake.stopped is True
+    assert len(event_wake.sent_messages) == 1
+    assert "🚫 你已被管理员禁止与 LLM 对话及交互至" in str(event_wake.sent_messages[0].parts)
+
+    # 2. event.is_at_or_wake_command = True
+    event_wake_cmd = DummyEvent(group_id="g1", user_id="u_wake", text="查天气")
+    event_wake_cmd.is_at_or_wake_command = True
+    await temp_hub._intercept_banned_message(event_wake_cmd)
+    assert event_wake_cmd.stopped is True
+    assert len(event_wake_cmd.sent_messages) == 1
+
+    # 3. @ 当前 Bot（通过 At 组件且目标等于 self_id）
+    event_at = DummyEvent(group_id="g1", user_id="u_wake", text="你好")
+    event_at.self_id = "bot_12345"
+    at_comp = type("AtComp", (), {"qq": "bot_12345"})()
+    event_at.message_obj = type("MsgObj", (), {"message": [at_comp]})()
+    await temp_hub._intercept_banned_message(event_at)
+    assert event_at.stopped is True
+    assert len(event_at.sent_messages) == 1
+
+    # 4. 引用回复 Bot 的消息（Reply 组件）
+    event_reply = DummyEvent(group_id="g1", user_id="u_wake", text="接着说")
+    event_reply.self_id = "bot_12345"
+    reply_comp = type("ReplyComp", (), {"sender": "bot_12345"})()
+    event_reply.message_obj = type("MsgObj", (), {"message": [reply_comp]})()
+    await temp_hub._intercept_banned_message(event_reply)
+    assert event_reply.stopped is True
+    assert len(event_reply.sent_messages) == 1
+
+
+@pytest.mark.asyncio
+async def test_ban_private_chat_and_group_normal_chat(temp_hub: QuotaHub, monkeypatch: pytest.MonkeyPatch):
+    """测试私聊拦截以及群聊普通发言（静默阻断后续，不刷屏提示）。"""
+    current_time = 1000000.0
+    monkeypatch.setattr(temp_hub, "_now", lambda: current_time)
+
+    admin_event = DummyEvent(group_id="g1", user_id="admin1", is_admin_user=True)
+    # 全局封禁
+    async for _ in temp_hub.cmd_ban(admin_event, "u_glob_test", "1d", "global 违规发言"):
+        pass
+
+    # 1. 私聊场景：任何消息均被视为对 Bot 交互，拦截并发送提示
+    private_event = DummyEvent(group_id="", user_id="u_glob_test", text="私聊你一个问题")
+    await temp_hub._intercept_banned_message(private_event)
+    assert private_event.stopped is True
+    assert len(private_event.sent_messages) == 1
+    assert "🚫 你已被管理员禁止与 LLM 对话及交互至" in str(private_event.sent_messages[0].parts)
+
+    # 2. 群聊普通闲聊场景：既非指令也未唤醒 Bot
+    # 阻断该事件继续流向其他插件，但【不】在群里发封禁提示，避免打扰群内正常交流
+    chat_event = DummyEvent(group_id="g1", user_id="u_glob_test", text="明天中午大家一起吃肯德基吗？")
+    await temp_hub._intercept_banned_message(chat_event)
+    assert chat_event.stopped is True
+    assert len(chat_event.sent_messages) == 0, "群聊普通闲聊不应发送封禁提醒刷屏"
+
+
+@pytest.mark.asyncio
+async def test_ban_silent_mode_and_direct_calls(temp_hub: QuotaHub, monkeypatch: pytest.MonkeyPatch):
+    """测试静默模式（send_ban_message=False）以及直接调用组件方法时的防御。"""
+    current_time = 1000000.0
+    monkeypatch.setattr(temp_hub, "_now", lambda: current_time)
+
+    admin_event = DummyEvent(group_id="g1", user_id="admin1", is_admin_user=True)
+    async for _ in temp_hub.cmd_ban(admin_event, "u_direct", "1d", "受限用户"):
+        pass
+
+    # 1. 开启 send_ban_message = False 时，指令仍被阻断，但无提示发送
+    temp_hub.config["send_ban_message"] = False
+    cmd_event = DummyEvent(group_id="g1", user_id="u_direct", text="/quota me")
+    await temp_hub._intercept_banned_message(cmd_event)
+    assert cmd_event.stopped is True
+    assert len(cmd_event.sent_messages) == 0
+    temp_hub.config["send_ban_message"] = True
+
+    # 2. 直接调用 _self_reset：被封禁直接拦截返回提示
+    reset_event = DummyEvent(group_id="g1", user_id="u_direct")
+    res_list = [r async for r in temp_hub._self_reset(reset_event, "short")]
+    assert len(res_list) == 1
+    assert "🚫 你已被管理员禁止与 LLM 对话及交互至" in res_list[0]
+    assert reset_event.stopped is True
+
+    # 3. 直接调用 quota_request：被封禁直接拦截返回提示
+    temp_hub.config["allow_reset_request"] = True
+    req_event = DummyEvent(group_id="g1", user_id="u_direct")
+    req_res = [r async for r in temp_hub.quota_request(req_event, "short", "1")]
+    assert len(req_res) == 1
+    assert "🚫 你已被管理员禁止与 LLM 对话及交互至" in req_res[0]
+    assert req_event.stopped is True
+
+
+@pytest.mark.asyncio
+async def test_ban_expiration_and_deduplication_and_isolation(temp_hub: QuotaHub, monkeypatch: pytest.MonkeyPatch):
+    """测试封禁过期、重复提示去重、群隔离与全局封禁。"""
+    current_time = 1000000.0
+    monkeypatch.setattr(temp_hub, "_now", lambda: current_time)
+
+    admin_event = DummyEvent(group_id="g1", user_id="admin1", is_admin_user=True)
+
+    # 1. 在 g1 封禁 u_iso 60 秒
+    async for _ in temp_hub.cmd_ban(admin_event, "u_iso", "60s", "测试隔离"):
+        pass
+
+    # 在 g1 发指令：被拦截
+    ev_g1 = DummyEvent(group_id="g1", user_id="u_iso", text="/help")
+    await temp_hub._intercept_banned_message(ev_g1)
+    assert ev_g1.stopped is True
+    assert len(ev_g1.sent_messages) == 1
+
+    # 在 g2 发指令：群隔离，不被拦截
+    ev_g2 = DummyEvent(group_id="g2", user_id="u_iso", text="/help")
+    await temp_hub._intercept_banned_message(ev_g2)
+    assert ev_g2.stopped is False
+    assert len(ev_g2.sent_messages) == 0
+
+    # 2. 消息去重测试：_intercept_banned_message 与 _enforce 连续调用同一 event 时，提示不重复发送
+    ev_dup = DummyEvent(group_id="g1", user_id="u_iso", text="/help")
+    req = type("Req", (), {"model": "gpt-4o"})()
+    await temp_hub._intercept_banned_message(ev_dup)
+    assert len(ev_dup.sent_messages) == 1
+    await temp_hub._enforce(ev_dup, req)
+    assert len(ev_dup.sent_messages) == 1, "同一事件中不应重复发送封禁提示"
+
+    # 3. 时间推进 70 秒（超过 60 秒），自动过期
+    current_time += 70.0
+    ev_expired = DummyEvent(group_id="g1", user_id="u_iso", text="/help")
+    await temp_hub._intercept_banned_message(ev_expired)
+    assert ev_expired.stopped is False
+    assert len(ev_expired.sent_messages) == 0
+
+    # 4. 插件总开关关闭时（enabled=False），不执行拦截
+    async for _ in temp_hub.cmd_ban(admin_event, "u_iso", "1d"):
+        pass
+    temp_hub.config["enabled"] = False
+    ev_disabled = DummyEvent(group_id="g1", user_id="u_iso", text="/help")
+    await temp_hub._intercept_banned_message(ev_disabled)
+    assert ev_disabled.stopped is False
+    temp_hub.config["enabled"] = True
+
+

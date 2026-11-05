@@ -79,8 +79,8 @@
 ### 管理员指令
 
 ```
-/ban   <QQ号或@成员> <时间（如1d）> [理由]           禁止某成员与 LLM 对话（支持 1d、2h、30m、永久等）
-/unban <QQ号或@成员>                               解除某成员的 LLM 对话封禁
+/ban   <QQ号或@成员> <时间（如1d）> [理由]           禁止某成员与 LLM 对话、使用任何指令或唤醒（支持 1d、2h、30m、永久等）
+/unban <QQ号或@成员>                               解除某成员的封禁
 /ban list                                          查看当前处于封禁中的成员列表
 /quota set user|group|member <...> <次数> <Token> [小时]
 /quota set members <群号> <次数> <Token> [小时]     某群全体成员的默认配额

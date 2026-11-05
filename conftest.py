@@ -27,12 +27,19 @@ if "astrbot" not in sys.modules:
             self.extras = {}
             self.stopped = False
             self.sent_messages = []
+            self.is_wake = False
+            self.is_at_or_wake_command = False
+            self.self_id = ""
+            self.message_obj = None
 
         def get_group_id(self):
             return self.group_id
 
         def get_sender_id(self):
             return self.sender_id
+
+        def get_self_id(self):
+            return getattr(self, "self_id", "")
 
         def get_sender_name(self):
             return self.sender_name
@@ -75,9 +82,16 @@ if "astrbot" not in sys.modules:
         def command(self, *a, **kw):
             return deco(*a, **kw)
 
+    class EventMessageType:
+        ALL = "ALL"
+        GROUP_MESSAGE = "GROUP_MESSAGE"
+        PRIVATE_MESSAGE = "PRIVATE_MESSAGE"
+
     filter_mod.on_llm_request = deco
     filter_mod.on_llm_response = deco
     filter_mod.on_waiting_llm_request = deco
+    filter_mod.event_message_type = deco
+    filter_mod.EventMessageType = EventMessageType
     filter_mod.command_group = lambda *a, **kw: lambda fn: _CommandRoot()
     filter_mod.command = deco
     filter_mod.permission_type = deco
